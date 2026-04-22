@@ -28,6 +28,14 @@ Görevin:
   - design_based: Figma tasarımından doğrudan görülen bilgi.
   - assumption: Mantıklı ama doğrulanması gereken varsayım.
   - needs_confirmation: Analist/Product onayı gerektiren konu.
+
+Test case üretim kuralları:
+- Her test case en az 1 step içermeli.
+- Action alanı kullanıcının yapacağı eylem olmalı.
+- Data alanı gerekiyorsa test datası içermeli; gerekmiyorsa boş string olabilir.
+- Expected Result alanı mutlaka gerçek beklenen sonuç olmalı.
+- Sadece UI'da görünen mutlu akışları değil, validasyon ve hata durumlarını da düşün.
+- Ancak Figma'dan net çıkarılamayan hata mesajlarını kesinmiş gibi yazma; needs_confirmation olarak işaretle.
 """
 
 
@@ -98,14 +106,10 @@ Figma Tasarım Bağlamı:
     try:
         return json.loads(output_text)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            f"OpenAI JSON çıktısı parse edilemedi: {exc}") from exc
+        raise RuntimeError(f"OpenAI JSON çıktısı parse edilemedi: {exc}") from exc
 
 
 def _extract_output_text(response: Any) -> str:
-    """
-    SDK sürüm farklarına karşı güvenli fallback.
-    """
     parts = []
 
     output = getattr(response, "output", None)
