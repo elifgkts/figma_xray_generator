@@ -1,14 +1,19 @@
 import base64
+import io
 import json
 import os
 from typing import Any, Optional, List
 
 import streamlit as st
 from dotenv import load_dotenv
+from PIL import Image
 
 from services.figma_client import FigmaClient, FigmaRateLimitError
 from services.figma_parser import build_design_context, extract_candidate_frames
-from services.ai_generator import generate_analysis_and_tests
+from services.ai_generator import (
+    generate_analysis_and_tests,
+    generate_analysis_and_tests_for_image_batches,
+)
 from services.exporters import (
     to_markdown,
     to_pdf_bytes,
@@ -19,7 +24,10 @@ from services.exporters import (
 
 load_dotenv()
 
-MAX_SCREENSHOTS = 6
+MAX_SCREENSHOTS = 60
+IMAGE_BATCH_SIZE = 6
+MAX_IMAGE_SIDE = 1600
+JPEG_QUALITY = 92
 
 st.set_page_config(
     page_title="Figma / Screenshot → Analiz + Xray",
@@ -29,10 +37,6 @@ st.set_page_config(
 
 
 def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
-    """
-    Lokal: .env
-    Streamlit Cloud: Secrets
-    """
     try:
         if key in st.secrets:
             return st.secrets[key]
@@ -61,7 +65,7 @@ def init_state() -> None:
 def show_header() -> None:
     st.title("🧪 Figma / Screenshot → Analiz Dokümanı + Xray Test Case Generator")
     st.caption(
-        "Figma node/layer bilgisi veya yüklenen birden fazla ekran görüntüsünden "
+        "Figma node/layer bilgisi veya yüklenen çoklu ekran görüntülerinden "
         "analiz dokümanı taslağı ve Xray'e import edilebilir manuel test case CSV'si üretir."
     )
 
@@ -94,16 +98,35 @@ def show_sidebar() -> tuple[str, str, str]:
 
 def uploaded_image_to_data_url(uploaded_file) -> str:
     """
-    Streamlit file_uploader ile gelen image dosyasını base64 data URL'e çevirir.
+    Görseli sıkıştırıp base64 data URL'e çevirir.
+    Tüm görseller analiz edilir; sıkıştırma sadece maliyet/payload kontrolü içindir.
     """
-    if uploaded_file is None:
-        return ""
 
-    mime_type = uploaded_file.type or "image/png"
-    raw_bytes = uploaded_file.getvalue()
-    encoded = base64.b64encode(raw_bytes).decode("utf-8")
+    image = Image.open(uploaded_file)
 
-    return f"data:{mime_type};base64,{encoded}"
+    if image.mode in ("RGBA", "P"):
+        background = Image.new("RGB", image.size, (255, 255, 255))
+        if image.mode == "RGBA":
+            background.paste(image, mask=image.split()[-1])
+        else:
+            background.paste(image.convert("RGBA"), mask=image.convert("RGBA").split()[-1])
+        image = background
+    else:
+        image = image.convert("RGB")
+
+    width, height = image.size
+    max_side = max(width, height)
+
+    if max_side > MAX_IMAGE_SIDE:
+        scale = MAX_IMAGE_SIDE / max_side
+        new_size = (int(width * scale), int(height * scale))
+        image = image.resize(new_size, Image.LANCZOS)
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=JPEG_QUALITY, optimize=True)
+
+    encoded = base64.b64encode(buffer.getvalue()).decode("utf-8")
+    return f"data:image/jpeg;base64,{encoded}"
 
 
 def uploaded_images_to_data_urls(uploaded_files: List[Any]) -> List[str]:
@@ -146,9 +169,10 @@ def build_screenshot_context(
             "figma_api_used": False,
             "screenshot_count": len(files),
             "max_screenshot_count": MAX_SCREENSHOTS,
+            "batch_size": IMAGE_BATCH_SIZE,
             "note": (
                 "Bu analiz Figma API node/layer verisi olmadan, "
-                "yüklenen ekran görüntüleri üzerinden üretilmiştir."
+                "yüklenen tüm ekran görüntüleri batch halinde analiz edilerek üretilmiştir."
             ),
         },
         "screenshots": screenshots,
@@ -247,7 +271,7 @@ def handle_generation(
     if uploaded_screenshots and len(uploaded_screenshots) > MAX_SCREENSHOTS:
         st.warning(
             f"{len(uploaded_screenshots)} görsel yüklendi. "
-            f"Maliyet ve performans için ilk {MAX_SCREENSHOTS} görsel kullanılacak."
+            f"İlk {MAX_SCREENSHOTS} görsel analizde kullanılacak."
         )
 
     try:
@@ -258,9 +282,6 @@ def handle_generation(
             with st.spinner("Figma node/layer verisi okunuyor..."):
                 figma_client = FigmaClient(figma_token)
 
-                # Önemli:
-                # include_image=False. Böylece Figma Images API kullanılmaz.
-                # Görsel analiz gerekiyorsa kullanıcı screenshot yükler.
                 payload = figma_client.get_design_payload(
                     figma_url,
                     include_image=False,
@@ -279,7 +300,8 @@ def handle_generation(
                 st.session_state.image_url = None
 
         if uses_screenshot:
-            image_data_urls = uploaded_images_to_data_urls(uploaded_screenshots)
+            with st.spinner("Ekran görüntüleri hazırlanıyor ve sıkıştırılıyor..."):
+                image_data_urls = uploaded_images_to_data_urls(uploaded_screenshots)
 
             if not design_context:
                 design_context = build_screenshot_context(
@@ -291,6 +313,7 @@ def handle_generation(
                 design_context["screenshot"] = {
                     "uploaded": True,
                     "count": min(len(uploaded_screenshots), MAX_SCREENSHOTS),
+                    "batch_size": IMAGE_BATCH_SIZE,
                     "filenames": [
                         file.name for file in uploaded_screenshots[:MAX_SCREENSHOTS]
                     ],
@@ -306,20 +329,35 @@ def handle_generation(
 
         st.session_state.design_context = design_context
 
-        with st.spinner("AI analiz dokümanı ve Xray test case listesi üretiyor..."):
-            result = generate_analysis_and_tests(
-                openai_api_key=openai_key,
-                model=model,
-                design_context=design_context,
-                image_urls=image_data_urls,
+        if image_data_urls:
+            st.info(
+                f"{len(image_data_urls)} görselin tamamı analiz edilecek. "
+                f"Görseller {IMAGE_BATCH_SIZE}'şarlı batch'ler halinde işlenecek."
             )
 
-            st.session_state.result_json = result
-            st.session_state.editable_json_text = json.dumps(
-                result,
-                ensure_ascii=False,
-                indent=2,
-            )
+            with st.spinner("AI tüm ekran görüntülerini batch halinde analiz ediyor..."):
+                result = generate_analysis_and_tests_for_image_batches(
+                    openai_api_key=openai_key,
+                    model=model,
+                    design_context=design_context,
+                    image_urls=image_data_urls,
+                    batch_size=IMAGE_BATCH_SIZE,
+                )
+        else:
+            with st.spinner("AI analiz dokümanı ve Xray test case listesi üretiyor..."):
+                result = generate_analysis_and_tests(
+                    openai_api_key=openai_key,
+                    model=model,
+                    design_context=design_context,
+                    image_urls=[],
+                )
+
+        st.session_state.result_json = result
+        st.session_state.editable_json_text = json.dumps(
+            result,
+            ensure_ascii=False,
+            indent=2,
+        )
 
         st.success("Analiz ve test case üretimi tamamlandı.")
 
@@ -556,7 +594,8 @@ def main() -> None:
             accept_multiple_files=True,
             help=(
                 "Birden fazla ekran yükleyebilirsin: ana ekran, popup, empty state, error state, success state vb. "
-                f"Maliyet/performans için ilk {MAX_SCREENSHOTS} görsel kullanılacak."
+                f"En fazla {MAX_SCREENSHOTS} görsel analiz edilecek. "
+                f"Görseller {IMAGE_BATCH_SIZE}'şarlı batch'lerle işlenecek."
             ),
         )
 
@@ -566,18 +605,30 @@ def main() -> None:
                     f"{len(uploaded_screenshots)} görsel yüklendi. "
                     f"İlk {MAX_SCREENSHOTS} görsel analizde kullanılacak."
                 )
+            else:
+                st.success(
+                    f"{len(uploaded_screenshots)} görsel yüklendi. "
+                    "Tüm görseller analizde kullanılacak."
+                )
 
-            st.caption("Yüklenen ekran görüntüleri:")
+            st.caption("Yüklenen ekran görüntülerinden önizleme:")
 
-            preview_cols = st.columns(3)
+            preview_cols = st.columns(4)
+            preview_limit = min(len(uploaded_screenshots), 12)
 
-            for index, uploaded_file in enumerate(uploaded_screenshots[:MAX_SCREENSHOTS]):
-                with preview_cols[index % 3]:
+            for index, uploaded_file in enumerate(uploaded_screenshots[:preview_limit]):
+                with preview_cols[index % 4]:
                     st.image(
                         uploaded_file,
                         caption=f"{index + 1}. {uploaded_file.name}",
                         use_container_width=True,
                     )
+
+            if len(uploaded_screenshots) > preview_limit:
+                st.info(
+                    f"Önizlemede ilk {preview_limit} görsel gösteriliyor; "
+                    f"analizde {min(len(uploaded_screenshots), MAX_SCREENSHOTS)} görsel kullanılacak."
+                )
 
     user_notes = st.text_area(
         "Ek bilgi / notlar",
