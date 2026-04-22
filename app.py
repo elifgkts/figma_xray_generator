@@ -1,7 +1,7 @@
 import base64
 import json
 import os
-from typing import Any, Optional
+from typing import Any, Optional, List
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -19,8 +19,10 @@ from services.exporters import (
 
 load_dotenv()
 
+MAX_SCREENSHOTS = 6
+
 st.set_page_config(
-    page_title="Figma → Analiz Dokümanı + Xray Test Case",
+    page_title="Figma / Screenshot → Analiz + Xray",
     page_icon="🧪",
     layout="wide",
 )
@@ -59,8 +61,8 @@ def init_state() -> None:
 def show_header() -> None:
     st.title("🧪 Figma / Screenshot → Analiz Dokümanı + Xray Test Case Generator")
     st.caption(
-        "Figma node/layer bilgisi veya yüklenen ekran görüntüsünden analiz dokümanı taslağı "
-        "ve Xray'e import edilebilir manuel test case CSV'si üretir."
+        "Figma node/layer bilgisi veya yüklenen birden fazla ekran görüntüsünden "
+        "analiz dokümanı taslağı ve Xray'e import edilebilir manuel test case CSV'si üretir."
     )
 
 
@@ -104,32 +106,60 @@ def uploaded_image_to_data_url(uploaded_file) -> str:
     return f"data:{mime_type};base64,{encoded}"
 
 
+def uploaded_images_to_data_urls(uploaded_files: List[Any]) -> List[str]:
+    if not uploaded_files:
+        return []
+
+    limited_files = uploaded_files[:MAX_SCREENSHOTS]
+    return [uploaded_image_to_data_url(file) for file in limited_files]
+
+
 def build_screenshot_context(
-    uploaded_file,
+    uploaded_files: List[Any],
     user_notes: str,
-    mode: str
+    mode: str,
 ) -> dict:
-    filename = uploaded_file.name if uploaded_file else ""
+    files = uploaded_files[:MAX_SCREENSHOTS] if uploaded_files else []
+
+    screenshots = []
+
+    for index, file in enumerate(files, start=1):
+        screenshots.append(
+            {
+                "index": index,
+                "filename": file.name,
+                "content_type": file.type,
+                "note": (
+                    "Bu ekran görüntüsü kullanıcı tarafından manuel yüklendi. "
+                    "Figma API kullanılmadan analiz edilebilir."
+                ),
+            }
+        )
 
     return {
         "source": "screenshot_upload",
         "mode": mode,
-        "screen_name": filename or "Yüklenen ekran görüntüsü",
+        "screen_name": "Çoklu ekran görüntüsü analizi",
         "user_notes": user_notes or "",
         "summary": {
-            "input_type": "image_only",
+            "input_type": "multiple_images",
             "figma_api_used": False,
+            "screenshot_count": len(files),
+            "max_screenshot_count": MAX_SCREENSHOTS,
             "note": (
                 "Bu analiz Figma API node/layer verisi olmadan, "
-                "yüklenen ekran görüntüsü üzerinden üretilmiştir."
-            )
+                "yüklenen ekran görüntüleri üzerinden üretilmiştir."
+            ),
         },
+        "screenshots": screenshots,
         "instructions": [
-            "Görselde görünen UI elementlerini analiz et.",
+            "Görsellerde görünen UI elementlerini analiz et.",
+            "Birden fazla ekran varsa ekranları aynı ürün akışının parçaları olarak değerlendir.",
+            "Ekranlar arasında olası geçişleri, popup/empty/error/success state ilişkilerini çıkar.",
             "Görselden net çıkarılamayan business rule'ları kesin bilgi gibi yazma.",
             "Belirsiz noktaları open_questions altında belirt.",
-            "Test case'leri Xray manuel test case formatına uygun üret."
-        ]
+            "Test case'leri Xray manuel test case formatına uygun üret.",
+        ],
     }
 
 
@@ -188,7 +218,7 @@ def handle_generation(
     openai_key: str,
     model: str,
     selected_node_id: Optional[str],
-    uploaded_screenshot,
+    uploaded_screenshots: List[Any],
     user_notes: str,
 ) -> None:
     if not openai_key:
@@ -210,12 +240,18 @@ def handle_generation(
         )
         st.stop()
 
-    if uses_screenshot and uploaded_screenshot is None:
-        st.error("Bu mod için ekran görüntüsü yüklemelisin.")
+    if uses_screenshot and not uploaded_screenshots:
+        st.error("Bu mod için en az 1 ekran görüntüsü yüklemelisin.")
         st.stop()
 
+    if uploaded_screenshots and len(uploaded_screenshots) > MAX_SCREENSHOTS:
+        st.warning(
+            f"{len(uploaded_screenshots)} görsel yüklendi. "
+            f"Maliyet ve performans için ilk {MAX_SCREENSHOTS} görsel kullanılacak."
+        )
+
     try:
-        image_data_url = None
+        image_data_urls: List[str] = []
         design_context = None
 
         if uses_figma:
@@ -243,35 +279,39 @@ def handle_generation(
                 st.session_state.image_url = None
 
         if uses_screenshot:
-            image_data_url = uploaded_image_to_data_url(uploaded_screenshot)
+            image_data_urls = uploaded_images_to_data_urls(uploaded_screenshots)
 
             if not design_context:
                 design_context = build_screenshot_context(
-                    uploaded_file=uploaded_screenshot,
+                    uploaded_files=uploaded_screenshots,
                     user_notes=user_notes,
                     mode=mode,
                 )
             else:
                 design_context["screenshot"] = {
                     "uploaded": True,
-                    "filename": uploaded_screenshot.name,
-                    "content_type": uploaded_screenshot.type,
+                    "count": min(len(uploaded_screenshots), MAX_SCREENSHOTS),
+                    "filenames": [
+                        file.name for file in uploaded_screenshots[:MAX_SCREENSHOTS]
+                    ],
                     "note": (
-                        "Bu modda Figma node/layer bilgisi ile manuel yüklenen ekran görüntüsü birlikte kullanılmıştır. "
+                        "Bu modda Figma node/layer bilgisi ile manuel yüklenen ekran görüntüleri birlikte kullanılmıştır. "
                         "Figma Images API kullanılmamıştır."
-                    )
+                    ),
                 }
 
         if not design_context:
             st.error("Analiz için kullanılacak bağlam oluşturulamadı.")
             st.stop()
 
+        st.session_state.design_context = design_context
+
         with st.spinner("AI analiz dokümanı ve Xray test case listesi üretiyor..."):
             result = generate_analysis_and_tests(
                 openai_api_key=openai_key,
                 model=model,
                 design_context=design_context,
-                image_url=image_data_url,
+                image_urls=image_data_urls,
             )
 
             st.session_state.result_json = result
@@ -338,7 +378,7 @@ def show_candidate_selector() -> Optional[str]:
     return selected_node_id
 
 
-def show_figma_summary() -> None:
+def show_analysis_context() -> None:
     if not st.session_state.design_context:
         return
 
@@ -346,37 +386,20 @@ def show_figma_summary() -> None:
     st.subheader("3. Analiz İçin Kullanılan Bağlam")
 
     context = st.session_state.design_context
-
     summary = context.get("summary", {})
 
     if "total_nodes" in summary:
         metric_cols = st.columns(6)
-        metric_cols[0].metric(
-            "Toplam Node",
-            summary.get("total_nodes", 0),
-        )
-        metric_cols[1].metric(
-            "Text",
-            summary.get("text_count", 0),
-        )
-        metric_cols[2].metric(
-            "Button",
-            summary.get("button_count", 0),
-        )
-        metric_cols[3].metric(
-            "Input",
-            summary.get("input_count", 0),
-        )
-        metric_cols[4].metric(
-            "Link",
-            summary.get("link_count", 0),
-        )
-        metric_cols[5].metric(
-            "Component",
-            summary.get("component_count", 0),
-        )
+        metric_cols[0].metric("Toplam Node", summary.get("total_nodes", 0))
+        metric_cols[1].metric("Text", summary.get("text_count", 0))
+        metric_cols[2].metric("Button", summary.get("button_count", 0))
+        metric_cols[3].metric("Input", summary.get("input_count", 0))
+        metric_cols[4].metric("Link", summary.get("link_count", 0))
+        metric_cols[5].metric("Component", summary.get("component_count", 0))
     else:
         st.info("Bu analiz screenshot üzerinden üretildiği için Figma node metrikleri bulunmuyor.")
+        if summary.get("screenshot_count") is not None:
+            st.metric("Kullanılan Screenshot", summary.get("screenshot_count", 0))
 
     with st.expander("Kullanılan Context JSON"):
         st.json(context)
@@ -496,7 +519,7 @@ def main() -> None:
     st.divider()
 
     figma_url = ""
-    uploaded_screenshot = None
+    uploaded_screenshots: List[Any] = []
 
     if mode in ["Figma API Modu", "Hibrit Mod"]:
         st.subheader("Figma Linki")
@@ -525,26 +548,43 @@ def main() -> None:
             handle_figma_scan(figma_url, figma_token)
 
     if mode in ["Screenshot Modu", "Hibrit Mod"]:
-        st.subheader("Ekran Görüntüsü")
+        st.subheader("Ekran Görüntüleri")
 
-        uploaded_screenshot = st.file_uploader(
-            "Figma ekran görüntüsünü yükle",
+        uploaded_screenshots = st.file_uploader(
+            "Figma ekran görüntülerini yükle",
             type=["png", "jpg", "jpeg", "webp"],
-            help="Screenshot Modu'nda Figma API hiç kullanılmaz. Hibrit Mod'da node bilgisi + bu görsel birlikte kullanılır.",
+            accept_multiple_files=True,
+            help=(
+                "Birden fazla ekran yükleyebilirsin: ana ekran, popup, empty state, error state, success state vb. "
+                f"Maliyet/performans için ilk {MAX_SCREENSHOTS} görsel kullanılacak."
+            ),
         )
 
-        if uploaded_screenshot:
-            st.image(
-                uploaded_screenshot,
-                caption="Yüklenen ekran görüntüsü",
-                use_container_width=True,
-            )
+        if uploaded_screenshots:
+            if len(uploaded_screenshots) > MAX_SCREENSHOTS:
+                st.warning(
+                    f"{len(uploaded_screenshots)} görsel yüklendi. "
+                    f"İlk {MAX_SCREENSHOTS} görsel analizde kullanılacak."
+                )
+
+            st.caption("Yüklenen ekran görüntüleri:")
+
+            preview_cols = st.columns(3)
+
+            for index, uploaded_file in enumerate(uploaded_screenshots[:MAX_SCREENSHOTS]):
+                with preview_cols[index % 3]:
+                    st.image(
+                        uploaded_file,
+                        caption=f"{index + 1}. {uploaded_file.name}",
+                        use_container_width=True,
+                    )
 
     user_notes = st.text_area(
         "Ek bilgi / notlar",
         placeholder=(
-            "Örn: Bu ekran fizy card colors UI kit içindir. "
-            "Status bilgisi sadece Ready for Development olduğunda gösterilir. "
+            "Örn: Bu ekranlar fizy son dinlenenler akışına aittir. "
+            "Liste itemlarına tıklanınca ilgili detay ekranına gidilir. "
+            "Chevron olan itemlar liste/albüm içeriğini açar. "
             "Test case'ler Xray Manual Test formatına uygun olmalı."
         ),
         height=120,
@@ -568,11 +608,11 @@ def main() -> None:
             openai_key=openai_key,
             model=model,
             selected_node_id=selected_node_id,
-            uploaded_screenshot=uploaded_screenshot,
+            uploaded_screenshots=uploaded_screenshots,
             user_notes=user_notes,
         )
 
-    show_figma_summary()
+    show_analysis_context()
     show_results_and_downloads()
 
 
