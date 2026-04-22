@@ -6,7 +6,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from services.figma_client import FigmaClient, FigmaRateLimitError
-from services.figma_parser import build_design_context
+from services.figma_parser import build_design_context, extract_candidate_frames
 from services.ai_generator import generate_analysis_and_tests
 from services.exporters import (
     to_markdown,
@@ -50,6 +50,8 @@ def init_state() -> None:
     st.session_state.setdefault("image_url", None)
     st.session_state.setdefault("result_json", None)
     st.session_state.setdefault("editable_json_text", "")
+    st.session_state.setdefault("figma_candidates", [])
+    st.session_state.setdefault("figma_file_key", None)
 
 
 def show_header() -> None:
@@ -95,8 +97,8 @@ def main() -> None:
     st.subheader("1. Figma Linki")
 
     figma_url = st.text_input(
-        "Figma ekran/frame linkini gir",
-        placeholder="https://www.figma.com/design/....?node-id=123-456",
+        "Figma dosya veya ekran/frame linkini gir",
+        placeholder="https://www.figma.com/design/....",
     )
 
     include_figma_image = st.checkbox(
@@ -108,20 +110,97 @@ def main() -> None:
         ),
     )
 
-    col1, col2 = st.columns([1, 3])
+    col_scan, col_generate, col_info = st.columns([1, 1, 3])
 
-    with col1:
+    with col_scan:
+        scan_button = st.button(
+            "Figma ekranlarını tara",
+            use_container_width=True,
+        )
+
+    with col_generate:
         generate_button = st.button(
             "Analiz ve Test Case Üret",
             type="primary",
             use_container_width=True,
         )
 
-    with col2:
+    with col_info:
         st.caption(
-            "En iyi sonuç için spesifik bir Frame/Screen linki kullan. "
-            "Tüm dosya linki verilirse veri çok geniş olabilir."
+            "Sadece dosya linki verirsen önce ekranları tara. "
+            "Node-id içeren spesifik frame linki verirsen doğrudan üretim de yapabilirsin."
         )
+
+    if scan_button:
+        if not figma_url:
+            st.error("Lütfen Figma linki gir.")
+            st.stop()
+
+        if not figma_token:
+            st.error("FIGMA_TOKEN bulunamadı. Lokal .env veya Streamlit Secrets içine eklemelisin.")
+            st.stop()
+
+        try:
+            with st.spinner("Figma dosyasındaki ekranlar taranıyor..."):
+                figma_client = FigmaClient(figma_token)
+                outline_payload = figma_client.get_design_outline_payload(
+                    figma_url,
+                    depth=3
+                )
+                candidates = extract_candidate_frames(outline_payload)
+
+                st.session_state["figma_file_key"] = outline_payload.get("file_key")
+                st.session_state["figma_candidates"] = candidates
+
+            if candidates:
+                st.success(f"{len(candidates)} ekran/frame adayı bulundu.")
+            else:
+                st.warning("Frame adayı bulunamadı. Linkin erişilebilir olduğundan emin ol.")
+
+        except FigmaRateLimitError as exc:
+            st.error(str(exc))
+
+            if exc.retry_after:
+                st.warning(
+                    f"Tekrar denemeden önce önerilen bekleme süresi: {exc.retry_after} saniye"
+                )
+
+            if exc.upgrade_link:
+                st.info(
+                    f"Figma plan/seat limitiyle ilişkili olabilir. "
+                    f"Upgrade/settings linki: {exc.upgrade_link}"
+                )
+
+            st.stop()
+
+        except Exception as exc:
+            st.error(f"Figma ekran tarama sırasında hata oluştu: {exc}")
+            st.stop()
+
+    selected_node_id = None
+
+    if st.session_state.get("figma_candidates"):
+        st.divider()
+        st.subheader("2. Bulunan Figma Ekranları")
+
+        candidate_labels = [
+            item["label"] for item in st.session_state["figma_candidates"]
+        ]
+
+        selected_label = st.selectbox(
+            "Analiz edilecek ekran/frame seç",
+            options=candidate_labels
+        )
+
+        selected_candidate = next(
+            item for item in st.session_state["figma_candidates"]
+            if item["label"] == selected_label
+        )
+
+        selected_node_id = selected_candidate["id"]
+
+        with st.expander("Seçilen frame bilgisi"):
+            st.json(selected_candidate)
 
     if generate_button:
         if not figma_url:
@@ -146,6 +225,7 @@ def main() -> None:
                 payload = figma_client.get_design_payload(
                     figma_url,
                     include_image=include_figma_image,
+                    selected_node_id=selected_node_id,
                 )
                 design_context = build_design_context(payload)
 
@@ -191,7 +271,7 @@ def main() -> None:
 
     if st.session_state.design_context:
         st.divider()
-        st.subheader("2. Figma'dan Çıkarılan Özet")
+        st.subheader("3. Figma'dan Çıkarılan Özet")
 
         context = st.session_state.design_context
 
@@ -230,7 +310,7 @@ def main() -> None:
 
     if st.session_state.result_json:
         st.divider()
-        st.subheader("3. AI Çıktısı / Düzenleme Alanı")
+        st.subheader("4. AI Çıktısı / Düzenleme Alanı")
 
         st.caption(
             "Buradaki JSON'u manuel düzeltebilirsin. "
@@ -250,7 +330,7 @@ def main() -> None:
             st.stop()
 
         st.divider()
-        st.subheader("4. Test Case Önizleme")
+        st.subheader("5. Test Case Önizleme")
 
         df = test_cases_to_dataframe(edited_result)
 
@@ -260,7 +340,7 @@ def main() -> None:
             st.dataframe(df, use_container_width=True)
 
         st.divider()
-        st.subheader("5. İndirilebilir Çıktılar")
+        st.subheader("6. İndirilebilir Çıktılar")
 
         markdown_text = to_markdown(edited_result)
         csv_bytes = to_xray_csv_bytes(edited_result)
