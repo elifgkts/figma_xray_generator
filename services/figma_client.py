@@ -99,11 +99,6 @@ class FigmaClient:
         return FigmaReference(file_key=file_key, node_id=node_id)
 
     def _request(self, url: str, params: Optional[dict] = None) -> dict:
-        """
-        Figma API çağrısı.
-        429 gelirse Retry-After kısa ise bekleyip tekrar dener.
-        Retry-After çok uzunsa kullanıcıya anlaşılır hata döndürür.
-        """
         attempt = 0
 
         while True:
@@ -172,7 +167,7 @@ class FigmaClient:
         rate_limit_type: Optional[str]
     ) -> str:
         parts = [
-            "Figma API rate limit'e takıldı. Yani kısa sürede çok fazla istek atıldı veya dosyanın bulunduğu plan/seat limiti doldu."
+            "Figma API rate limit'e takıldı. Kısa sürede çok fazla istek atılmış olabilir veya dosyanın bulunduğu plan/seat limiti dolmuş olabilir."
         ]
 
         if retry_after is not None:
@@ -185,7 +180,7 @@ class FigmaClient:
             parts.append(f"Rate limit tipi: {rate_limit_type}")
 
         parts.append(
-            "Bir süre bekleyip tekrar deneyebilirsin. Aynı linke art arda basmamak ve mümkünse spesifik frame linki kullanmak önemli."
+            "Bir süre bekleyip tekrar deneyebilirsin. Aynı linke art arda basmamak ve önce ekran listesini tarayıp tek frame seçmek daha sağlıklı olur."
         )
 
         return " ".join(parts)
@@ -193,6 +188,33 @@ class FigmaClient:
     def get_file(self, file_key: str) -> dict:
         url = f"{self.base_url}/files/{file_key}"
         return self._request(url)
+
+    def get_file_outline(self, file_key: str, depth: int = 2) -> dict:
+        url = f"{self.base_url}/files/{file_key}"
+        return self._request(
+            url,
+            params={"depth": depth}
+        )
+
+    def get_file_subset_by_node(
+        self,
+        file_key: str,
+        node_id: str,
+        depth: Optional[int] = None
+    ) -> dict:
+        url = f"{self.base_url}/files/{file_key}"
+
+        params = {
+            "ids": node_id
+        }
+
+        if depth is not None:
+            params["depth"] = depth
+
+        return self._request(
+            url,
+            params=params
+        )
 
     def get_node(self, file_key: str, node_id: str) -> dict:
         url = f"{self.base_url}/files/{file_key}/nodes"
@@ -221,27 +243,50 @@ class FigmaClient:
         images = data.get("images", {})
         return images.get(node_id)
 
-    def get_design_payload(self, figma_url: str, include_image: bool = False) -> dict:
+    def get_design_outline_payload(self, figma_url: str, depth: int = 2) -> dict:
         ref = self.extract_reference(figma_url)
+        outline_data = self.get_file_outline(ref.file_key, depth=depth)
 
-        if ref.node_id:
-            node_data = self.get_node(ref.file_key, ref.node_id)
+        return {
+            "file_key": ref.file_key,
+            "node_id": ref.node_id,
+            "raw": outline_data,
+            "node_tree": outline_data.get("document")
+        }
+
+    def get_design_payload(
+        self,
+        figma_url: str,
+        include_image: bool = False,
+        selected_node_id: Optional[str] = None
+    ) -> dict:
+        ref = self.extract_reference(figma_url)
+        target_node_id = selected_node_id or ref.node_id
+
+        if target_node_id:
+            file_data = self.get_file_subset_by_node(
+                ref.file_key,
+                target_node_id
+            )
 
             image_url = None
             if include_image:
-                image_url = self.get_node_image_url(ref.file_key, ref.node_id)
+                image_url = self.get_node_image_url(
+                    ref.file_key,
+                    target_node_id
+                )
 
-            node_tree = None
-            node_record = node_data.get("nodes", {}).get(ref.node_id)
-            if node_record:
-                node_tree = node_record.get("document")
+            node_tree = self._find_node_by_id(
+                file_data.get("document"),
+                target_node_id
+            )
 
             return {
                 "file_key": ref.file_key,
-                "node_id": ref.node_id,
+                "node_id": target_node_id,
                 "image_url": image_url,
-                "raw": node_data,
-                "node_tree": node_tree
+                "raw": file_data,
+                "node_tree": node_tree or file_data.get("document")
             }
 
         file_data = self.get_file(ref.file_key)
@@ -253,3 +298,18 @@ class FigmaClient:
             "raw": file_data,
             "node_tree": file_data.get("document")
         }
+
+    @staticmethod
+    def _find_node_by_id(node: Optional[dict], target_id: str) -> Optional[dict]:
+        if not node:
+            return None
+
+        if node.get("id") == target_id:
+            return node
+
+        for child in node.get("children", []) or []:
+            found = FigmaClient._find_node_by_id(child, target_id)
+            if found:
+                return found
+
+        return None
