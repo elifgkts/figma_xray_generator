@@ -8,13 +8,20 @@ BUTTON_KEYWORDS = [
     "buton",
     "devam",
     "giriş",
+    "giris",
     "kaydet",
     "onayla",
     "iptal",
     "ara",
     "başla",
+    "basla",
     "satın al",
-    "tamam"
+    "satin al",
+    "tamam",
+    "submit",
+    "continue",
+    "save",
+    "cancel"
 ]
 
 INPUT_KEYWORDS = [
@@ -27,21 +34,28 @@ INPUT_KEYWORDS = [
     "phone",
     "email",
     "e-posta",
+    "eposta",
     "şifre",
+    "sifre",
     "password",
     "arama",
     "search",
     "tarih",
-    "date"
+    "date",
+    "adres",
+    "address"
 ]
 
 LINK_KEYWORDS = [
     "link",
     "forgot",
     "şifremi unuttum",
+    "sifremi unuttum",
     "detay",
     "tümünü gör",
+    "tumunu gor",
     "yardım",
+    "yardim",
     "terms",
     "privacy",
     "kvkk"
@@ -104,6 +118,7 @@ def _compact_node(node: dict, depth: int = 0, max_depth: int = 5) -> Optional[di
         return None
 
     result = {
+        "id": node.get("id", ""),
         "name": name,
         "type": node_type,
         "text": text or "",
@@ -126,6 +141,7 @@ def _walk(node: dict, depth: int = 0) -> List[dict]:
     rows = []
 
     current = {
+        "id": node.get("id", ""),
         "depth": depth,
         "name": _node_name(node),
         "type": _node_type(node),
@@ -140,8 +156,7 @@ def _walk(node: dict, depth: int = 0) -> List[dict]:
 
 
 def build_design_context(payload: dict) -> Dict[str, Any]:
-    node_tree = payload.get("node_tree") or payload.get(
-        "raw", {}).get("document")
+    node_tree = payload.get("node_tree") or payload.get("raw", {}).get("document")
 
     if not node_tree:
         raise ValueError("Figma node/document verisi bulunamadı.")
@@ -163,7 +178,7 @@ def build_design_context(payload: dict) -> Dict[str, Any]:
         if text:
             texts.append(text)
 
-        if node_type in ["FRAME", "COMPONENT", "INSTANCE", "COMPONENT_SET"]:
+        if node_type in ["FRAME", "SECTION", "COMPONENT", "INSTANCE", "COMPONENT_SET"]:
             frames.append(name)
 
         if node_type in ["COMPONENT", "INSTANCE", "COMPONENT_SET"]:
@@ -216,6 +231,88 @@ def build_design_context(payload: dict) -> Dict[str, Any]:
     }
 
     return context
+
+
+def extract_candidate_frames(payload: dict) -> List[Dict[str, Any]]:
+    """
+    Figma dosyasındaki analiz edilebilir ekran/frame adaylarını çıkarır.
+    Dosya linki verildiğinde kullanıcıya dropdown sunmak için kullanılır.
+    """
+    node_tree = payload.get("node_tree") or payload.get("raw", {}).get("document")
+
+    if not node_tree:
+        return []
+
+    candidates = []
+
+    def walk(node: dict, page_name: str = "", depth: int = 0) -> None:
+        node_type = _node_type(node)
+        node_name = _node_name(node)
+        node_id = node.get("id", "")
+
+        current_page = page_name
+
+        if node_type == "CANVAS":
+            current_page = node_name
+
+        if node_type in ["FRAME", "SECTION", "COMPONENT", "INSTANCE"]:
+            children = node.get("children", []) or []
+            text_count = _count_text_nodes(node)
+
+            box = node.get("absoluteBoundingBox") or {}
+            width = box.get("width") or 0
+            height = box.get("height") or 0
+
+            score = 0
+            score += 40 if node_type == "FRAME" else 15
+            score += 20 if width >= 300 and height >= 300 else 0
+            score += min(len(children), 50)
+            score += min(text_count * 2, 30)
+            score -= depth
+
+            label_page = current_page or "Page"
+            label_name = node_name or "(isimsiz frame)"
+
+            candidates.append(
+                {
+                    "id": node_id,
+                    "name": label_name,
+                    "type": node_type,
+                    "page": label_page,
+                    "depth": depth,
+                    "children_count": len(children),
+                    "text_count": text_count,
+                    "width": round(width, 2),
+                    "height": round(height, 2),
+                    "score": score,
+                    "label": f"{label_page} / {label_name} [{node_type}] - {node_id}"
+                }
+            )
+
+        for child in node.get("children", []) or []:
+            walk(child, current_page, depth + 1)
+
+    walk(node_tree)
+
+    candidates.sort(
+        key=lambda item: (
+            item.get("score", 0),
+            item.get("children_count", 0),
+            item.get("text_count", 0)
+        ),
+        reverse=True
+    )
+
+    return candidates
+
+
+def _count_text_nodes(node: dict) -> int:
+    count = 1 if node.get("type") == "TEXT" and node.get("characters") else 0
+
+    for child in node.get("children", []) or []:
+        count += _count_text_nodes(child)
+
+    return count
 
 
 def _dedupe(items: List[str]) -> List[str]:
