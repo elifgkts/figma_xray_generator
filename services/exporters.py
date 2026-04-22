@@ -19,9 +19,6 @@ XRAY_COLUMNS = [
 
 
 def normalize_result(result: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    JSON editor üzerinden gelen küçük eksikliklere karşı koruma.
-    """
     result.setdefault("analysis_document", {})
     result.setdefault("test_cases", [])
     result.setdefault("generation_notes", [])
@@ -47,8 +44,7 @@ def to_markdown(result: Dict[str, Any]) -> str:
     analysis = result["analysis_document"]
     lines = []
 
-    lines.append(
-        f"# {analysis.get('title') or 'Sistem Analiz ve Gereksinim Dokümanı'}")
+    lines.append(f"# {analysis.get('title') or 'Sistem Analiz ve Gereksinim Dokümanı'}")
     lines.append("")
 
     lines.append("## 1. Proje Özeti")
@@ -88,7 +84,9 @@ def to_markdown(result: Dict[str, Any]) -> str:
     lines.append("## 6. İş Kuralları")
     for rule in analysis.get("business_rules", []):
         lines.append(
-            f"- **{rule.get('id', '')}:** {rule.get('rule', '')} _({rule.get('source_confidence', '')})_")
+            f"- **{rule.get('id', '')}:** {rule.get('rule', '')} "
+            f"_({rule.get('source_confidence', '')})_"
+        )
     lines.append("")
 
     lines.append("## 7. Ekran Akışları")
@@ -113,8 +111,7 @@ def to_markdown(result: Dict[str, Any]) -> str:
         lines.append(f"### {case.get('summary', '')}")
         lines.append(f"- **Priority:** {case.get('priority', '')}")
         lines.append(f"- **Precondition:** {case.get('precondition', '')}")
-        lines.append(
-            f"- **Source Confidence:** {case.get('source_confidence', '')}")
+        lines.append(f"- **Source Confidence:** {case.get('source_confidence', '')}")
         lines.append("")
         lines.append("| Step | Action | Data | Expected Result |")
         lines.append("|---:|---|---|---|")
@@ -157,8 +154,7 @@ def to_xray_csv_bytes(result: Dict[str, Any]) -> bytes:
         ]
 
         labels = case.get("labels", [])
-        labels_text = ",".join(labels) if isinstance(
-            labels, list) else str(labels)
+        labels_text = ",".join(labels) if isinstance(labels, list) else str(labels)
 
         for step in steps:
             writer.writerow(
