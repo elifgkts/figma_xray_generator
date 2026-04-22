@@ -1,4 +1,6 @@
+import copy
 import json
+import math
 from typing import Any, Dict, Optional, List
 
 from openai import (
@@ -63,17 +65,6 @@ def generate_analysis_and_tests(
     image_url: Optional[str] = None,
     image_urls: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """
-    Figma context ve/veya birden fazla screenshot image input bilgisini alır,
-    OpenAI ile analiz dokümanı + Xray test case JSON çıktısı üretir.
-
-    image_url:
-    - Geriye dönük uyumluluk için tek görsel parametresi.
-
-    image_urls:
-    - Birden fazla base64 data URL veya image URL listesi.
-    """
-
     if not openai_api_key:
         raise ValueError(
             "OPENAI_API_KEY bulunamadı. "
@@ -92,9 +83,6 @@ def generate_analysis_and_tests(
 
     if image_url:
         all_image_urls.append(image_url)
-
-    # Maliyeti ve context karmaşasını sınırlamak için maksimum 6 görsel.
-    all_image_urls = all_image_urls[:6]
 
     user_text = f"""
 Aşağıdaki bağlama göre analiz dokümanı ve Xray manuel test case listesi üret.
@@ -203,11 +191,223 @@ Not:
     return parsed_result
 
 
-def _extract_output_text(response: Any) -> str:
+def generate_analysis_and_tests_for_image_batches(
+    openai_api_key: str,
+    model: str,
+    design_context: Dict[str, Any],
+    image_urls: List[str],
+    batch_size: int = 6,
+) -> Dict[str, Any]:
     """
-    SDK sürüm farklarına karşı güvenli fallback.
+    Tüm görselleri analiz eder.
+    Görselleri batch'lere böler, her batch için ayrı analiz üretir,
+    sonra tüm sonuçları tek analiz dokümanı + tek test case listesinde birleştirir.
     """
 
+    if not image_urls:
+        return generate_analysis_and_tests(
+            openai_api_key=openai_api_key,
+            model=model,
+            design_context=design_context,
+            image_urls=[],
+        )
+
+    total_images = len(image_urls)
+    total_batches = math.ceil(total_images / batch_size)
+
+    batch_results: List[Dict[str, Any]] = []
+
+    for batch_index in range(total_batches):
+        start = batch_index * batch_size
+        end = min(start + batch_size, total_images)
+
+        batch_images = image_urls[start:end]
+
+        batch_context = copy.deepcopy(design_context)
+        batch_context["batch_processing"] = {
+            "enabled": True,
+            "batch_index": batch_index + 1,
+            "total_batches": total_batches,
+            "total_images": total_images,
+            "image_indexes_in_this_batch": list(range(start + 1, end + 1)),
+            "instruction": (
+                "Bu batch içindeki görselleri ayrı ayrı analiz et. "
+                "Görüntüler genel akışın parçasıdır. "
+                "Bu batch'te gördüğün ekranlar için gereksinim, iş kuralı, akış ve test case üret."
+            ),
+        }
+
+        result = generate_analysis_and_tests(
+            openai_api_key=openai_api_key,
+            model=model,
+            design_context=batch_context,
+            image_urls=batch_images,
+        )
+
+        batch_results.append(result)
+
+    return merge_batch_results_locally(
+        batch_results=batch_results,
+        original_context=design_context,
+        total_images=total_images,
+        total_batches=total_batches,
+    )
+
+
+def merge_batch_results_locally(
+    batch_results: List[Dict[str, Any]],
+    original_context: Dict[str, Any],
+    total_images: int,
+    total_batches: int,
+) -> Dict[str, Any]:
+    """
+    Batch sonuçlarını deterministic şekilde birleştirir.
+    Burada ekstra OpenAI çağrısı yapılmaz.
+    Böylece tüm görseller analiz edilmiş olur ve tek çıktı oluşur.
+    """
+
+    combined = {
+        "analysis_document": {
+            "title": "Çoklu Ekran Analiz ve Gereksinim Dokümanı",
+            "project_summary": "",
+            "scope": "",
+            "user_roles": [],
+            "screens": [],
+            "functional_requirements": [],
+            "business_rules": [],
+            "screen_flows": [],
+            "open_questions": [],
+            "qa_notes": [],
+        },
+        "test_cases": [],
+        "generation_notes": [],
+    }
+
+    project_summaries = []
+    scopes = []
+
+    user_roles_seen = set()
+    screen_seen = set()
+    open_question_seen = set()
+    qa_note_seen = set()
+    flow_seen = set()
+    test_summary_seen = set()
+
+    fr_counter = 1
+    br_counter = 1
+
+    for batch_no, result in enumerate(batch_results, start=1):
+        analysis = result.get("analysis_document", {})
+
+        if analysis.get("project_summary"):
+            project_summaries.append(f"Batch {batch_no}: {analysis.get('project_summary')}")
+
+        if analysis.get("scope"):
+            scopes.append(f"Batch {batch_no}: {analysis.get('scope')}")
+
+        for role in analysis.get("user_roles", []):
+            key = normalize_text_key(role)
+            if key and key not in user_roles_seen:
+                user_roles_seen.add(key)
+                combined["analysis_document"]["user_roles"].append(role)
+
+        for screen in analysis.get("screens", []):
+            screen_name = screen.get("name", "")
+            key = normalize_text_key(screen_name)
+            if not key:
+                key = normalize_text_key(json.dumps(screen, ensure_ascii=False))
+
+            if key not in screen_seen:
+                screen_seen.add(key)
+                combined["analysis_document"]["screens"].append(screen)
+
+        for req in analysis.get("functional_requirements", []):
+            new_req = dict(req)
+            new_req["id"] = f"FR-{fr_counter:03d}"
+            fr_counter += 1
+            combined["analysis_document"]["functional_requirements"].append(new_req)
+
+        for rule in analysis.get("business_rules", []):
+            new_rule = dict(rule)
+            new_rule["id"] = f"BR-{br_counter:03d}"
+            br_counter += 1
+            combined["analysis_document"]["business_rules"].append(new_rule)
+
+        for flow in analysis.get("screen_flows", []):
+            key = normalize_text_key(flow.get("flow_name", "")) + "|" + normalize_text_key(
+                " ".join(flow.get("steps", []))
+            )
+            if key and key not in flow_seen:
+                flow_seen.add(key)
+                combined["analysis_document"]["screen_flows"].append(flow)
+
+        for question in analysis.get("open_questions", []):
+            key = normalize_text_key(question)
+            if key and key not in open_question_seen:
+                open_question_seen.add(key)
+                combined["analysis_document"]["open_questions"].append(question)
+
+        for note in analysis.get("qa_notes", []):
+            key = normalize_text_key(note)
+            if key and key not in qa_note_seen:
+                qa_note_seen.add(key)
+                combined["analysis_document"]["qa_notes"].append(note)
+
+        for case in result.get("test_cases", []):
+            summary = case.get("summary", "")
+            key = normalize_text_key(summary)
+
+            if key and key not in test_summary_seen:
+                test_summary_seen.add(key)
+
+                new_case = dict(case)
+                labels = new_case.get("labels", [])
+                if isinstance(labels, list):
+                    labels.append(f"batch_{batch_no}")
+                    new_case["labels"] = list(dict.fromkeys(labels))
+
+                combined["test_cases"].append(new_case)
+
+        for note in result.get("generation_notes", []):
+            combined["generation_notes"].append(f"Batch {batch_no}: {note}")
+
+    combined["analysis_document"]["project_summary"] = (
+        f"{total_images} ekran görüntüsü {total_batches} batch halinde analiz edilmiştir. "
+        "Aşağıdaki doküman, tüm batch sonuçlarının birleştirilmiş analiz çıktısıdır. "
+        + " ".join(project_summaries[:5])
+    )
+
+    combined["analysis_document"]["scope"] = (
+        "Bu doküman, yüklenen tüm ekran görüntülerinde görülen UI elementleri, ekran akışları, "
+        "iş kuralları, açık noktalar ve QA test kapsamını içerir. "
+        + " ".join(scopes[:5])
+    )
+
+    combined["generation_notes"].insert(
+        0,
+        f"Tüm görseller analiz edildi. Toplam görsel: {total_images}, batch sayısı: {total_batches}, batch boyutu: yaklaşık 6 görsel.",
+    )
+
+    if original_context.get("user_notes"):
+        combined["generation_notes"].insert(
+            1,
+            f"Kullanıcı notu dikkate alındı: {original_context.get('user_notes')}",
+        )
+
+    return combined
+
+
+def normalize_text_key(value: Any) -> str:
+    if value is None:
+        return ""
+
+    text = str(value).strip().lower()
+    text = " ".join(text.split())
+
+    return text
+
+
+def _extract_output_text(response: Any) -> str:
     parts = []
 
     output = getattr(response, "output", None)
