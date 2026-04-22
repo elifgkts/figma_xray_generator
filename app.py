@@ -37,6 +37,10 @@ st.set_page_config(
 
 
 def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
+    """
+    Lokal: .env
+    Streamlit Cloud: Secrets
+    """
     try:
         if key in st.secrets:
             return st.secrets[key]
@@ -73,9 +77,40 @@ def show_header() -> None:
 def show_sidebar() -> tuple[str, str, str]:
     st.sidebar.header("⚙️ Ayarlar")
 
-    figma_token = get_secret("FIGMA_TOKEN")
-    openai_key = get_secret("OPENAI_API_KEY")
+    secret_figma_token = get_secret("FIGMA_TOKEN")
+    secret_openai_key = get_secret("OPENAI_API_KEY")
     default_model = get_secret("OPENAI_MODEL", "gpt-4o")
+
+    st.sidebar.subheader("🔐 Kullanıcı Tokenları")
+
+    st.sidebar.caption(
+        "Tokenlar bu ekranda saklanmaz. Sadece mevcut oturumda kullanılır."
+    )
+
+    user_figma_token = st.sidebar.text_input(
+        "Figma Personal Access Token",
+        type="password",
+        placeholder="figd_...",
+        help=(
+            "Kendi Figma tokenını buraya girebilirsin. "
+            "Boş bırakırsan Streamlit Secrets içindeki FIGMA_TOKEN kullanılır."
+        ),
+    )
+
+    user_openai_key = st.sidebar.text_input(
+        "OpenAI API Key",
+        type="password",
+        placeholder="sk-proj-...",
+        help=(
+            "Kendi OpenAI API keyini buraya girebilirsin. "
+            "Boş bırakırsan Streamlit Secrets içindeki OPENAI_API_KEY kullanılır."
+        ),
+    )
+
+    figma_token = user_figma_token.strip() if user_figma_token else secret_figma_token
+    openai_key = user_openai_key.strip() if user_openai_key else secret_openai_key
+
+    st.sidebar.divider()
 
     model = st.sidebar.text_input(
         "OpenAI Model",
@@ -83,14 +118,30 @@ def show_sidebar() -> tuple[str, str, str]:
         help="Örn: gpt-4o, gpt-4.1-mini vb.",
     )
 
+    if not model or model.strip() in ["gpt-0", "gpt-o", "gpt4o"]:
+        model = "gpt-4o"
+
     st.sidebar.divider()
 
     st.sidebar.write("**Token Durumu**")
-    st.sidebar.write("Figma Token:", "✅ Var" if figma_token else "❌ Yok")
-    st.sidebar.write("OpenAI API Key:", "✅ Var" if openai_key else "❌ Yok")
+
+    if user_figma_token:
+        st.sidebar.write("Figma Token:", "✅ Kullanıcı tokenı girildi")
+    elif secret_figma_token:
+        st.sidebar.write("Figma Token:", "✅ Secrets içinden geliyor")
+    else:
+        st.sidebar.write("Figma Token:", "❌ Yok")
+
+    if user_openai_key:
+        st.sidebar.write("OpenAI API Key:", "✅ Kullanıcı keyi girildi")
+    elif secret_openai_key:
+        st.sidebar.write("OpenAI API Key:", "✅ Secrets içinden geliyor")
+    else:
+        st.sidebar.write("OpenAI API Key:", "❌ Yok")
 
     st.sidebar.info(
-        "GitHub'a token koyma. Streamlit Cloud'da App Settings > Secrets alanına ekle."
+        "GitHub'a token koyma. .env.example içine gerçek token yazma. "
+        "Buraya girilen tokenlar sadece oturumda kullanılır."
     )
 
     return figma_token, openai_key, model
@@ -106,10 +157,13 @@ def uploaded_image_to_data_url(uploaded_file) -> str:
 
     if image.mode in ("RGBA", "P"):
         background = Image.new("RGB", image.size, (255, 255, 255))
+
         if image.mode == "RGBA":
             background.paste(image, mask=image.split()[-1])
         else:
-            background.paste(image.convert("RGBA"), mask=image.convert("RGBA").split()[-1])
+            rgba_image = image.convert("RGBA")
+            background.paste(rgba_image, mask=rgba_image.split()[-1])
+
         image = background
     else:
         image = image.convert("RGB")
@@ -193,7 +247,7 @@ def handle_figma_scan(figma_url: str, figma_token: str) -> None:
         st.stop()
 
     if not figma_token:
-        st.error("FIGMA_TOKEN bulunamadı. Lokal .env veya Streamlit Secrets içine eklemelisin.")
+        st.error("FIGMA_TOKEN bulunamadı. Sidebar’dan token girebilir veya Streamlit Secrets içine ekleyebilirsin.")
         st.stop()
 
     try:
@@ -247,7 +301,7 @@ def handle_generation(
 ) -> None:
     if not openai_key:
         st.error(
-            "OPENAI_API_KEY bulunamadı. Lokal .env veya Streamlit Secrets içine eklemelisin."
+            "OPENAI_API_KEY bulunamadı. Sidebar’dan OpenAI API key girebilir veya Streamlit Secrets içine ekleyebilirsin."
         )
         st.stop()
 
@@ -260,7 +314,7 @@ def handle_generation(
 
     if uses_figma and not figma_token:
         st.error(
-            "Bu mod için FIGMA_TOKEN gerekli. Lokal .env veya Streamlit Secrets içine eklemelisin."
+            "Bu mod için FIGMA_TOKEN gerekli. Sidebar’dan token girebilir veya Streamlit Secrets içine ekleyebilirsin."
         )
         st.stop()
 
