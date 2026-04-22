@@ -139,7 +139,10 @@ def main() -> None:
         try:
             with st.spinner("Figma verisi okunuyor..."):
                 figma_client = FigmaClient(figma_token)
-                payload = figma_client.get_design_payload(figma_url)
+                payload = figma_client.get_design_payload(
+    figma_url,
+    include_image=include_figma_image
+)
                 design_context = build_design_context(payload)
 
                 st.session_state.design_context = design_context
@@ -161,6 +164,17 @@ def main() -> None:
                 )
 
             st.success("Analiz ve test case üretimi tamamlandı.")
+
+                except FigmaRateLimitError as exc:
+            st.error(str(exc))
+
+            if exc.retry_after:
+                st.warning(f"Tekrar denemeden önce önerilen bekleme süresi: {exc.retry_after} saniye")
+
+            if exc.upgrade_link:
+                st.info(f"Figma plan/seat limitiyle ilişkili olabilir. Upgrade/settings linki: {exc.upgrade_link}")
+
+            st.stop()
 
         except Exception as exc:
             st.error(f"İşlem sırasında hata oluştu: {exc}")
