@@ -1,9 +1,27 @@
 import csv
 import io
 import json
+import os
 from typing import Any, Dict, List
+from xml.sax.saxutils import escape
 
 import pandas as pd
+
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_LEFT, TA_CENTER
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import cm
+from reportlab.platypus import (
+    SimpleDocTemplate,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+    PageBreak,
+)
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 
 XRAY_COLUMNS = [
@@ -14,7 +32,7 @@ XRAY_COLUMNS = [
     "Labels",
     "Manual Test Step (Action)",
     "Manual Test Step (Data)",
-    "Manual Test Step (Expected Result)"
+    "Manual Test Step (Expected Result)",
 ]
 
 
@@ -130,6 +148,170 @@ def to_markdown(result: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def to_pdf_bytes(result: Dict[str, Any]) -> bytes:
+    """
+    Analiz dokümanını PDF olarak üretir.
+    Türkçe karakter desteği için mümkünse DejaVuSans fontunu kullanır.
+    """
+    result = normalize_result(result)
+    analysis = result["analysis_document"]
+
+    buffer = io.BytesIO()
+
+    font_name = _register_pdf_font()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=A4,
+        rightMargin=1.6 * cm,
+        leftMargin=1.6 * cm,
+        topMargin=1.4 * cm,
+        bottomMargin=1.4 * cm,
+        title=analysis.get("title") or "Sistem Analiz ve Gereksinim Dokümanı",
+    )
+
+    styles = _build_pdf_styles(font_name)
+    story = []
+
+    title = analysis.get("title") or "Sistem Analiz ve Gereksinim Dokümanı"
+
+    story.append(Paragraph(_xml(title), styles["Title"]))
+    story.append(Spacer(1, 0.4 * cm))
+
+    story.append(Paragraph("1. Proje Özeti", styles["Heading1"]))
+    story.append(Paragraph(_xml(analysis.get("project_summary", "")), styles["Body"]))
+    story.append(Spacer(1, 0.3 * cm))
+
+    story.append(Paragraph("2. Kapsam", styles["Heading1"]))
+    story.append(Paragraph(_xml(analysis.get("scope", "")), styles["Body"]))
+    story.append(Spacer(1, 0.3 * cm))
+
+    story.append(Paragraph("3. Kullanıcı Rolleri", styles["Heading1"]))
+    _add_bullets(story, analysis.get("user_roles", []), styles)
+    story.append(Spacer(1, 0.3 * cm))
+
+    story.append(Paragraph("4. Ekran Analizi", styles["Heading1"]))
+    for screen in analysis.get("screens", []):
+        story.append(Paragraph(_xml(screen.get("name", "")), styles["Heading2"]))
+        story.append(Paragraph(f"<b>Amaç:</b> {_xml(screen.get('purpose', ''))}", styles["Body"]))
+
+        story.append(Paragraph("<b>Görünen Elementler:</b>", styles["Body"]))
+        _add_bullets(story, screen.get("visible_elements", []), styles)
+
+        story.append(Paragraph("<b>Etkileşimler:</b>", styles["Body"]))
+        _add_bullets(story, screen.get("interactions", []), styles)
+
+        story.append(Spacer(1, 0.2 * cm))
+
+    story.append(Paragraph("5. Fonksiyonel Gereksinimler", styles["Heading1"]))
+    for req in analysis.get("functional_requirements", []):
+        heading = f"{req.get('id', '')} - {req.get('title', '')}"
+        story.append(Paragraph(_xml(heading), styles["Heading2"]))
+        story.append(Paragraph(_xml(req.get("description", "")), styles["Body"]))
+        story.append(
+            Paragraph(
+                f"<b>Kaynak Güveni:</b> {_xml(req.get('source_confidence', ''))}",
+                styles["Small"],
+            )
+        )
+        story.append(Spacer(1, 0.2 * cm))
+
+    story.append(Paragraph("6. İş Kuralları", styles["Heading1"]))
+    for rule in analysis.get("business_rules", []):
+        text = f"{rule.get('id', '')}: {rule.get('rule', '')} ({rule.get('source_confidence', '')})"
+        story.append(Paragraph(f"• {_xml(text)}", styles["Body"]))
+    story.append(Spacer(1, 0.3 * cm))
+
+    story.append(Paragraph("7. Ekran Akışları", styles["Heading1"]))
+    for flow in analysis.get("screen_flows", []):
+        story.append(Paragraph(_xml(flow.get("flow_name", "")), styles["Heading2"]))
+        for index, step in enumerate(flow.get("steps", []), start=1):
+            story.append(Paragraph(f"{index}. {_xml(step)}", styles["Body"]))
+        story.append(Spacer(1, 0.2 * cm))
+
+    story.append(Paragraph("8. Açık Noktalar / Analist Onayı Gerekenler", styles["Heading1"]))
+    _add_bullets(story, analysis.get("open_questions", []), styles)
+    story.append(Spacer(1, 0.3 * cm))
+
+    story.append(Paragraph("9. QA Notları", styles["Heading1"]))
+    _add_bullets(story, analysis.get("qa_notes", []), styles)
+    story.append(Spacer(1, 0.3 * cm))
+
+    story.append(PageBreak())
+
+    story.append(Paragraph("10. Üretilen Test Case Özeti", styles["Heading1"]))
+
+    for case_index, case in enumerate(result.get("test_cases", []), start=1):
+        story.append(
+            Paragraph(
+                f"{case_index}. {_xml(case.get('summary', ''))}",
+                styles["Heading2"],
+            )
+        )
+
+        meta = (
+            f"<b>Priority:</b> {_xml(case.get('priority', ''))} &nbsp;&nbsp; "
+            f"<b>Precondition:</b> {_xml(case.get('precondition', ''))} &nbsp;&nbsp; "
+            f"<b>Confidence:</b> {_xml(case.get('source_confidence', ''))}"
+        )
+        story.append(Paragraph(meta, styles["Small"]))
+        story.append(Spacer(1, 0.15 * cm))
+
+        table_data = [
+            [
+                Paragraph("Step", styles["TableHeader"]),
+                Paragraph("Action", styles["TableHeader"]),
+                Paragraph("Data", styles["TableHeader"]),
+                Paragraph("Expected Result", styles["TableHeader"]),
+            ]
+        ]
+
+        for step_index, step in enumerate(case.get("steps", []), start=1):
+            table_data.append(
+                [
+                    Paragraph(str(step_index), styles["TableCell"]),
+                    Paragraph(_xml(step.get("action", "")), styles["TableCell"]),
+                    Paragraph(_xml(step.get("data", "")), styles["TableCell"]),
+                    Paragraph(_xml(step.get("expected_result", "")), styles["TableCell"]),
+                ]
+            )
+
+        table = Table(
+            table_data,
+            colWidths=[1.2 * cm, 5.0 * cm, 4.0 * cm, 6.3 * cm],
+            repeatRows=1,
+        )
+
+        table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#263238")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#B0BEC5")),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("BACKGROUND", (0, 1), (-1, -1), colors.HexColor("#FAFAFA")),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 5),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                ]
+            )
+        )
+
+        story.append(table)
+        story.append(Spacer(1, 0.4 * cm))
+
+    story.append(Paragraph("11. Üretim Notları", styles["Heading1"]))
+    _add_bullets(story, result.get("generation_notes", []), styles)
+
+    doc.build(story)
+
+    pdf_value = buffer.getvalue()
+    buffer.close()
+
+    return pdf_value
+
+
 def to_xray_csv_bytes(result: Dict[str, Any]) -> bytes:
     result = normalize_result(result)
 
@@ -139,7 +321,7 @@ def to_xray_csv_bytes(result: Dict[str, Any]) -> bytes:
         fieldnames=XRAY_COLUMNS,
         delimiter=";",
         quoting=csv.QUOTE_MINIMAL,
-        lineterminator="\n"
+        lineterminator="\n",
     )
 
     writer.writeheader()
@@ -149,7 +331,7 @@ def to_xray_csv_bytes(result: Dict[str, Any]) -> bytes:
             {
                 "action": "",
                 "data": "",
-                "expected_result": ""
+                "expected_result": "",
             }
         ]
 
@@ -166,7 +348,7 @@ def to_xray_csv_bytes(result: Dict[str, Any]) -> bytes:
                     "Labels": labels_text,
                     "Manual Test Step (Action)": step.get("action", ""),
                     "Manual Test Step (Data)": step.get("data", ""),
-                    "Manual Test Step (Expected Result)": step.get("expected_result", "")
+                    "Manual Test Step (Expected Result)": step.get("expected_result", ""),
                 }
             )
 
@@ -177,7 +359,7 @@ def to_json_bytes(result: Dict[str, Any]) -> bytes:
     return json.dumps(
         result,
         ensure_ascii=False,
-        indent=2
+        indent=2,
     ).encode("utf-8")
 
 
@@ -198,7 +380,7 @@ def test_cases_to_rows(result: Dict[str, Any]) -> List[Dict[str, Any]]:
                     "Confidence": case.get("source_confidence", ""),
                     "Action": step.get("action", ""),
                     "Data": step.get("data", ""),
-                    "Expected Result": step.get("expected_result", "")
+                    "Expected Result": step.get("expected_result", ""),
                 }
             )
 
@@ -207,6 +389,115 @@ def test_cases_to_rows(result: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def test_cases_to_dataframe(result: Dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(test_cases_to_rows(result))
+
+
+def _register_pdf_font() -> str:
+    """
+    Streamlit Cloud/Linux ortamında genelde DejaVu fontu vardır.
+    Windows lokal çalıştırmada Arial denenir.
+    Bulunamazsa Helvetica fallback olur, ama Türkçe karakterlerde sorun yaşanabilir.
+    """
+    font_candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/calibri.ttf",
+        "/Library/Fonts/Arial.ttf",
+    ]
+
+    for path in font_candidates:
+        if os.path.exists(path):
+            font_name = "AppUnicodeFont"
+            if font_name not in pdfmetrics.getRegisteredFontNames():
+                pdfmetrics.registerFont(TTFont(font_name, path))
+            return font_name
+
+    return "Helvetica"
+
+
+def _build_pdf_styles(font_name: str) -> Dict[str, ParagraphStyle]:
+    base = getSampleStyleSheet()
+
+    return {
+        "Title": ParagraphStyle(
+            "CustomTitle",
+            parent=base["Title"],
+            fontName=font_name,
+            fontSize=18,
+            leading=24,
+            alignment=TA_CENTER,
+            spaceAfter=14,
+            textColor=colors.HexColor("#263238"),
+        ),
+        "Heading1": ParagraphStyle(
+            "CustomHeading1",
+            parent=base["Heading1"],
+            fontName=font_name,
+            fontSize=14,
+            leading=18,
+            spaceBefore=10,
+            spaceAfter=8,
+            textColor=colors.HexColor("#1A237E"),
+        ),
+        "Heading2": ParagraphStyle(
+            "CustomHeading2",
+            parent=base["Heading2"],
+            fontName=font_name,
+            fontSize=11,
+            leading=14,
+            spaceBefore=8,
+            spaceAfter=5,
+            textColor=colors.HexColor("#37474F"),
+        ),
+        "Body": ParagraphStyle(
+            "CustomBody",
+            parent=base["BodyText"],
+            fontName=font_name,
+            fontSize=9,
+            leading=13,
+            alignment=TA_LEFT,
+            spaceAfter=5,
+        ),
+        "Small": ParagraphStyle(
+            "CustomSmall",
+            parent=base["BodyText"],
+            fontName=font_name,
+            fontSize=8,
+            leading=11,
+            textColor=colors.HexColor("#546E7A"),
+            spaceAfter=5,
+        ),
+        "TableHeader": ParagraphStyle(
+            "CustomTableHeader",
+            parent=base["BodyText"],
+            fontName=font_name,
+            fontSize=8,
+            leading=10,
+            textColor=colors.white,
+        ),
+        "TableCell": ParagraphStyle(
+            "CustomTableCell",
+            parent=base["BodyText"],
+            fontName=font_name,
+            fontSize=7.5,
+            leading=10,
+        ),
+    }
+
+
+def _add_bullets(story: list, items: List[str], styles: Dict[str, ParagraphStyle]) -> None:
+    if not items:
+        story.append(Paragraph("Belirtilmemiş.", styles["Body"]))
+        return
+
+    for item in items:
+        story.append(Paragraph(f"• {_xml(item)}", styles["Body"]))
+
+
+def _xml(value: Any) -> str:
+    text = "" if value is None else str(value)
+    text = text.replace("\n", "<br/>")
+    return escape(text, {"\"": "&quot;", "'": "&#39;"})
 
 
 def _escape_md(value: str) -> str:
