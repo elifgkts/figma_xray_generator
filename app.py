@@ -100,6 +100,11 @@ def main() -> None:
         "Figma ekran/frame linkini gir",
         placeholder="https://www.figma.com/design/....?node-id=123-456"
     )
+    include_figma_image = st.checkbox(
+    "Figma ekran görselini de analiz et",
+    value=False,
+    help="Açık olursa Figma Images API'ye ek istek atılır. Rate limit'e takılıyorsan kapalı bırak."
+)
 
     col1, col2 = st.columns([1, 3])
 
