@@ -12,17 +12,15 @@ from services.exporters import (
     to_markdown,
     to_xray_csv_bytes,
     to_json_bytes,
-    test_cases_to_dataframe
+    test_cases_to_dataframe,
 )
 
-
 load_dotenv()
-
 
 st.set_page_config(
     page_title="Figma → Analiz Dokümanı + Xray Test Case",
     page_icon="🧪",
-    layout="wide"
+    layout="wide",
 )
 
 
@@ -72,7 +70,7 @@ def show_sidebar() -> tuple[str, str, str]:
     model = st.sidebar.text_input(
         "OpenAI Model",
         value=default_model or "gpt-4o",
-        help="Örn: gpt-4o, gpt-4.1-mini vb."
+        help="Örn: gpt-4o, gpt-4.1-mini vb.",
     )
 
     st.sidebar.divider()
@@ -98,13 +96,17 @@ def main() -> None:
 
     figma_url = st.text_input(
         "Figma ekran/frame linkini gir",
-        placeholder="https://www.figma.com/design/....?node-id=123-456"
+        placeholder="https://www.figma.com/design/....?node-id=123-456",
     )
+
     include_figma_image = st.checkbox(
-    "Figma ekran görselini de analiz et",
-    value=False,
-    help="Açık olursa Figma Images API'ye ek istek atılır. Rate limit'e takılıyorsan kapalı bırak."
-)
+        "Figma ekran görselini de analiz et",
+        value=False,
+        help=(
+            "Açık olursa Figma Images API'ye ek istek atılır. "
+            "Rate limit'e takılıyorsan kapalı bırak."
+        ),
+    )
 
     col1, col2 = st.columns([1, 3])
 
@@ -112,7 +114,7 @@ def main() -> None:
         generate_button = st.button(
             "Analiz ve Test Case Üret",
             type="primary",
-            use_container_width=True
+            use_container_width=True,
         )
 
     with col2:
@@ -128,21 +130,23 @@ def main() -> None:
 
         if not figma_token:
             st.error(
-                "FIGMA_TOKEN bulunamadı. Lokal .env veya Streamlit Secrets içine eklemelisin.")
+                "FIGMA_TOKEN bulunamadı. Lokal .env veya Streamlit Secrets içine eklemelisin."
+            )
             st.stop()
 
         if not openai_key:
             st.error(
-                "OPENAI_API_KEY bulunamadı. Lokal .env veya Streamlit Secrets içine eklemelisin.")
+                "OPENAI_API_KEY bulunamadı. Lokal .env veya Streamlit Secrets içine eklemelisin."
+            )
             st.stop()
 
         try:
             with st.spinner("Figma verisi okunuyor..."):
                 figma_client = FigmaClient(figma_token)
                 payload = figma_client.get_design_payload(
-    figma_url,
-    include_image=include_figma_image
-)
+                    figma_url,
+                    include_image=include_figma_image,
+                )
                 design_context = build_design_context(payload)
 
                 st.session_state.design_context = design_context
@@ -153,26 +157,31 @@ def main() -> None:
                     openai_api_key=openai_key,
                     model=model,
                     design_context=st.session_state.design_context,
-                    image_url=st.session_state.image_url
+                    image_url=st.session_state.image_url,
                 )
 
                 st.session_state.result_json = result
                 st.session_state.editable_json_text = json.dumps(
                     result,
                     ensure_ascii=False,
-                    indent=2
+                    indent=2,
                 )
 
             st.success("Analiz ve test case üretimi tamamlandı.")
 
-                except FigmaRateLimitError as exc:
+        except FigmaRateLimitError as exc:
             st.error(str(exc))
 
             if exc.retry_after:
-                st.warning(f"Tekrar denemeden önce önerilen bekleme süresi: {exc.retry_after} saniye")
+                st.warning(
+                    f"Tekrar denemeden önce önerilen bekleme süresi: {exc.retry_after} saniye"
+                )
 
             if exc.upgrade_link:
-                st.info(f"Figma plan/seat limitiyle ilişkili olabilir. Upgrade/settings linki: {exc.upgrade_link}")
+                st.info(
+                    f"Figma plan/seat limitiyle ilişkili olabilir. "
+                    f"Upgrade/settings linki: {exc.upgrade_link}"
+                )
 
             st.stop()
 
@@ -187,18 +196,30 @@ def main() -> None:
         context = st.session_state.design_context
 
         metric_cols = st.columns(6)
-        metric_cols[0].metric("Toplam Node", context.get(
-            "summary", {}).get("total_nodes", 0))
-        metric_cols[1].metric("Text", context.get(
-            "summary", {}).get("text_count", 0))
-        metric_cols[2].metric("Button", context.get(
-            "summary", {}).get("button_count", 0))
-        metric_cols[3].metric("Input", context.get(
-            "summary", {}).get("input_count", 0))
-        metric_cols[4].metric("Link", context.get(
-            "summary", {}).get("link_count", 0))
-        metric_cols[5].metric("Component", context.get(
-            "summary", {}).get("component_count", 0))
+        metric_cols[0].metric(
+            "Toplam Node",
+            context.get("summary", {}).get("total_nodes", 0),
+        )
+        metric_cols[1].metric(
+            "Text",
+            context.get("summary", {}).get("text_count", 0),
+        )
+        metric_cols[2].metric(
+            "Button",
+            context.get("summary", {}).get("button_count", 0),
+        )
+        metric_cols[3].metric(
+            "Input",
+            context.get("summary", {}).get("input_count", 0),
+        )
+        metric_cols[4].metric(
+            "Link",
+            context.get("summary", {}).get("link_count", 0),
+        )
+        metric_cols[5].metric(
+            "Component",
+            context.get("summary", {}).get("component_count", 0),
+        )
 
         if st.session_state.image_url:
             with st.expander("Figma Render Görseli"):
@@ -219,12 +240,11 @@ def main() -> None:
         st.session_state.editable_json_text = st.text_area(
             "JSON Çıktısı",
             value=st.session_state.editable_json_text,
-            height=450
+            height=450,
         )
 
         try:
-            edited_result = safe_json_loads(
-                st.session_state.editable_json_text)
+            edited_result = safe_json_loads(st.session_state.editable_json_text)
         except ValueError as exc:
             st.error(str(exc))
             st.stop()
@@ -254,7 +274,7 @@ def main() -> None:
                 data=markdown_text.encode("utf-8-sig"),
                 file_name="analiz_dokumani.md",
                 mime="text/markdown",
-                use_container_width=True
+                use_container_width=True,
             )
 
         with download_cols[1]:
@@ -263,7 +283,7 @@ def main() -> None:
                 data=csv_bytes,
                 file_name="xray_import_test_cases.csv",
                 mime="text/csv",
-                use_container_width=True
+                use_container_width=True,
             )
 
         with download_cols[2]:
@@ -272,7 +292,7 @@ def main() -> None:
                 data=json_bytes,
                 file_name="figma_analysis_output.json",
                 mime="application/json",
-                use_container_width=True
+                use_container_width=True,
             )
 
         with st.expander("Analiz Dokümanı Önizleme"):
