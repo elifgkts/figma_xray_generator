@@ -140,7 +140,6 @@ def show_sidebar() -> tuple[str, str, str]:
         st.sidebar.write("OpenAI API Key:", "❌ Yok")
 
     st.sidebar.info(
-        "GitHub'a token koyma. .env.example içine gerçek token yazma. "
         "Buraya girilen tokenlar sadece oturumda kullanılır."
     )
 
