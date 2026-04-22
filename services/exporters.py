@@ -151,15 +151,11 @@ def to_markdown(result: Dict[str, Any]) -> str:
 
 
 def to_pdf_bytes(result: Dict[str, Any]) -> bytes:
-    """
-    Analiz dokümanını PDF olarak üretir.
-    Türkçe karakter desteği için DejaVu normal + bold font ailesi register edilir.
-    """
     result = normalize_result(result)
     analysis = result["analysis_document"]
 
     buffer = io.BytesIO()
-    font_name = _register_pdf_font()
+    fonts = _register_pdf_fonts()
 
     doc = SimpleDocTemplate(
         buffer,
@@ -171,7 +167,7 @@ def to_pdf_bytes(result: Dict[str, Any]) -> bytes:
         title=analysis.get("title") or "Sistem Analiz ve Gereksinim Dokümanı",
     )
 
-    styles = _build_pdf_styles(font_name)
+    styles = _build_pdf_styles(fonts)
     story = []
 
     title = analysis.get("title") or "Sistem Analiz ve Gereksinim Dokümanı"
@@ -397,82 +393,56 @@ def test_cases_to_dataframe(result: Dict[str, Any]) -> pd.DataFrame:
     return pd.DataFrame(test_cases_to_rows(result))
 
 
-def _register_pdf_font() -> str:
+def _register_pdf_fonts() -> Dict[str, str]:
     """
-    Türkçe karakterler için DejaVu font ailesini register eder.
-    Özellikle bold kullanımlarında Türkçe karakterlerin kareleşmemesi için
-    normal + bold + italic + bold italic family birlikte tanımlanır.
+    Türkçe karakterler için fontları ayrı ayrı register eder.
+    Font family mapping kullanmaz; doğrudan font adlarıyla çalışır.
+    Bu yüzden ReportLab'in bold/italic mapping hatasına düşmez.
     """
 
     font_sets = [
         {
-            "normal": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "regular": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "bold": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "italic": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
-            "bold_italic": "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf",
         },
         {
-            "normal": "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+            "regular": "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
             "bold": "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
-            "italic": "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Oblique.ttf",
-            "bold_italic": "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-BoldOblique.ttf",
         },
         {
-            "normal": "C:/Windows/Fonts/arial.ttf",
+            "regular": "C:/Windows/Fonts/arial.ttf",
             "bold": "C:/Windows/Fonts/arialbd.ttf",
-            "italic": "C:/Windows/Fonts/ariali.ttf",
-            "bold_italic": "C:/Windows/Fonts/arialbi.ttf",
         },
         {
-            "normal": "C:/Windows/Fonts/calibri.ttf",
+            "regular": "C:/Windows/Fonts/calibri.ttf",
             "bold": "C:/Windows/Fonts/calibrib.ttf",
-            "italic": "C:/Windows/Fonts/calibrii.ttf",
-            "bold_italic": "C:/Windows/Fonts/calibriz.ttf",
         },
         {
-            "normal": "/Library/Fonts/Arial.ttf",
+            "regular": "/Library/Fonts/Arial.ttf",
             "bold": "/Library/Fonts/Arial Bold.ttf",
-            "italic": "/Library/Fonts/Arial Italic.ttf",
-            "bold_italic": "/Library/Fonts/Arial Bold Italic.ttf",
         },
     ]
 
     for font_set in font_sets:
-        normal = font_set["normal"]
-        bold = font_set["bold"]
-        italic = font_set["italic"]
-        bold_italic = font_set["bold_italic"]
+        regular_path = font_set["regular"]
+        bold_path = font_set["bold"]
 
-        if os.path.exists(normal) and os.path.exists(bold):
-            family_name = "AppUnicodeFont"
+        if os.path.exists(regular_path) and os.path.exists(bold_path):
+            regular_name = "AppUnicodeFont-Regular"
+            bold_name = "AppUnicodeFont-Bold"
+
             registered = pdfmetrics.getRegisteredFontNames()
 
-            regular_name = f"{family_name}-Regular"
-            bold_name = f"{family_name}-Bold"
-            italic_name = f"{family_name}-Italic"
-            bold_italic_name = f"{family_name}-BoldItalic"
-
             if regular_name not in registered:
-                pdfmetrics.registerFont(TTFont(regular_name, normal))
+                pdfmetrics.registerFont(TTFont(regular_name, regular_path))
 
             if bold_name not in registered:
-                pdfmetrics.registerFont(TTFont(bold_name, bold))
+                pdfmetrics.registerFont(TTFont(bold_name, bold_path))
 
-            if os.path.exists(italic) and italic_name not in registered:
-                pdfmetrics.registerFont(TTFont(italic_name, italic))
-
-            if os.path.exists(bold_italic) and bold_italic_name not in registered:
-                pdfmetrics.registerFont(TTFont(bold_italic_name, bold_italic))
-
-            pdfmetrics.registerFontFamily(
-                family_name,
-                normal=regular_name,
-                bold=bold_name,
-                italic=italic_name if os.path.exists(italic) else regular_name,
-                boldItalic=bold_italic_name if os.path.exists(bold_italic) else bold_name,
-            )
-
-            return family_name
+            return {
+                "regular": regular_name,
+                "bold": bold_name,
+            }
 
     raise RuntimeError(
         "PDF için Türkçe karakter destekli font bulunamadı. "
@@ -480,14 +450,16 @@ def _register_pdf_font() -> str:
     )
 
 
-def _build_pdf_styles(font_name: str) -> Dict[str, ParagraphStyle]:
+def _build_pdf_styles(fonts: Dict[str, str]) -> Dict[str, ParagraphStyle]:
     base = getSampleStyleSheet()
+    regular_font = fonts["regular"]
+    bold_font = fonts["bold"]
 
     return {
         "Title": ParagraphStyle(
             "CustomTitle",
-            parent=base["Title"],
-            fontName=font_name,
+            parent=base["Normal"],
+            fontName=bold_font,
             fontSize=18,
             leading=24,
             alignment=TA_CENTER,
@@ -496,8 +468,8 @@ def _build_pdf_styles(font_name: str) -> Dict[str, ParagraphStyle]:
         ),
         "Heading1": ParagraphStyle(
             "CustomHeading1",
-            parent=base["Heading1"],
-            fontName=font_name,
+            parent=base["Normal"],
+            fontName=bold_font,
             fontSize=14,
             leading=18,
             spaceBefore=10,
@@ -506,8 +478,8 @@ def _build_pdf_styles(font_name: str) -> Dict[str, ParagraphStyle]:
         ),
         "Heading2": ParagraphStyle(
             "CustomHeading2",
-            parent=base["Heading2"],
-            fontName=font_name,
+            parent=base["Normal"],
+            fontName=bold_font,
             fontSize=11,
             leading=14,
             spaceBefore=8,
@@ -516,8 +488,8 @@ def _build_pdf_styles(font_name: str) -> Dict[str, ParagraphStyle]:
         ),
         "Body": ParagraphStyle(
             "CustomBody",
-            parent=base["BodyText"],
-            fontName=font_name,
+            parent=base["Normal"],
+            fontName=regular_font,
             fontSize=9,
             leading=13,
             alignment=TA_LEFT,
@@ -525,8 +497,8 @@ def _build_pdf_styles(font_name: str) -> Dict[str, ParagraphStyle]:
         ),
         "Small": ParagraphStyle(
             "CustomSmall",
-            parent=base["BodyText"],
-            fontName=font_name,
+            parent=base["Normal"],
+            fontName=regular_font,
             fontSize=8,
             leading=11,
             textColor=colors.HexColor("#546E7A"),
@@ -534,8 +506,8 @@ def _build_pdf_styles(font_name: str) -> Dict[str, ParagraphStyle]:
         ),
         "SmallBold": ParagraphStyle(
             "CustomSmallBold",
-            parent=base["BodyText"],
-            fontName=font_name,
+            parent=base["Normal"],
+            fontName=bold_font,
             fontSize=8.5,
             leading=11,
             textColor=colors.HexColor("#37474F"),
@@ -544,16 +516,16 @@ def _build_pdf_styles(font_name: str) -> Dict[str, ParagraphStyle]:
         ),
         "TableHeader": ParagraphStyle(
             "CustomTableHeader",
-            parent=base["BodyText"],
-            fontName=font_name,
+            parent=base["Normal"],
+            fontName=bold_font,
             fontSize=8,
             leading=10,
             textColor=colors.white,
         ),
         "TableCell": ParagraphStyle(
             "CustomTableCell",
-            parent=base["BodyText"],
-            fontName=font_name,
+            parent=base["Normal"],
+            fontName=regular_font,
             fontSize=7.5,
             leading=10,
         ),
