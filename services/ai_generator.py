@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
 from openai import (
     OpenAI,
@@ -17,7 +17,7 @@ SYSTEM_PROMPT = """
 Sen kıdemli bir İş Analisti, Sistem Analisti ve QA Test Mimarı gibi davran.
 
 Görevin:
-1. Figma ekranından veya yüklenen ekran görüntüsünden analiz dokümanı üretmek.
+1. Figma ekranından, Figma node/layer bilgisinden veya yüklenen birden fazla ekran görüntüsünden analiz dokümanı üretmek.
 2. Gereksinimleri açık, test edilebilir ve iş birimlerinin anlayacağı Türkçe ile yazmak.
 3. Xray'e import edilebilecek manuel test case'ler üretmek.
 4. Kesin olarak tasarımdan/görselden çıkarılamayan konuları uydurmamak; "open_questions" veya "needs_confirmation" olarak işaretlemek.
@@ -36,6 +36,13 @@ Görevin:
   - assumption: Mantıklı ama doğrulanması gereken varsayım.
   - needs_confirmation: Analist/Product onayı gerektiren konu.
 
+Birden fazla ekran görüntüsü varsa:
+- Ekranları bir akışın parçası gibi değerlendir.
+- Ekranlar arasında geçiş, popup, empty state, error state, success state ilişkilerini yakala.
+- Aynı davranış tekrar ediyorsa gereksiz duplicate test case üretme.
+- Her ekran için ayrı ayrı gözlem yap, sonra ortak iş kurallarını çıkar.
+- Eğer ekran sırası net değilse bunu open_questions altında belirt.
+
 Test case üretim kuralları:
 - Her test case en az 1 step içermeli.
 - Action alanı kullanıcının yapacağı eylem olmalı.
@@ -53,16 +60,18 @@ def generate_analysis_and_tests(
     openai_api_key: str,
     model: str,
     design_context: Dict[str, Any],
-    image_url: Optional[str] = None
+    image_url: Optional[str] = None,
+    image_urls: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
-    Figma context ve/veya screenshot image input bilgisini alır,
+    Figma context ve/veya birden fazla screenshot image input bilgisini alır,
     OpenAI ile analiz dokümanı + Xray test case JSON çıktısı üretir.
 
     image_url:
-    - Figma render URL olabilir.
-    - Base64 data URL olabilir.
-    - None olabilir.
+    - Geriye dönük uyumluluk için tek görsel parametresi.
+
+    image_urls:
+    - Birden fazla base64 data URL veya image URL listesi.
     """
 
     if not openai_api_key:
@@ -76,26 +85,42 @@ def generate_analysis_and_tests(
 
     client = OpenAI(api_key=openai_api_key)
 
+    all_image_urls: List[str] = []
+
+    if image_urls:
+        all_image_urls.extend([url for url in image_urls if url])
+
+    if image_url:
+        all_image_urls.append(image_url)
+
+    # Maliyeti ve context karmaşasını sınırlamak için maksimum 6 görsel.
+    all_image_urls = all_image_urls[:6]
+
     user_text = f"""
 Aşağıdaki bağlama göre analiz dokümanı ve Xray manuel test case listesi üret.
 
 Bağlam:
 {json.dumps(design_context, ensure_ascii=False, indent=2)}
+
+Not:
+- Eğer birden fazla screenshot gönderildiyse, bunları aynı ürün/akışa ait ekranlar olarak değerlendir.
+- Görsellerdeki UI elementlerini, metinleri, durumları ve etkileşim ipuçlarını dikkate al.
+- Net çıkarılamayan iş kuralı ve akışları açık nokta olarak belirt.
 """
 
     user_content = [
         {
             "type": "input_text",
-            "text": user_text
+            "text": user_text,
         }
     ]
 
-    if image_url:
+    for img in all_image_urls:
         user_content.append(
             {
                 "type": "input_image",
-                "image_url": image_url,
-                "detail": "high"
+                "image_url": img,
+                "detail": "high",
             }
         )
 
@@ -105,22 +130,22 @@ Bağlam:
             input=[
                 {
                     "role": "system",
-                    "content": SYSTEM_PROMPT
+                    "content": SYSTEM_PROMPT,
                 },
                 {
                     "role": "user",
-                    "content": user_content
-                }
+                    "content": user_content,
+                },
             ],
             text={
                 "format": {
                     "type": "json_schema",
                     "name": "figma_analysis_xray_output",
                     "schema": OUTPUT_JSON_SCHEMA,
-                    "strict": True
+                    "strict": True,
                 }
             },
-            max_output_tokens=8000
+            max_output_tokens=8000,
         )
 
     except AuthenticationError as exc:
