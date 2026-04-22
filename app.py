@@ -5,7 +5,7 @@ from typing import Any, Optional
 import streamlit as st
 from dotenv import load_dotenv
 
-from services.figma_client import FigmaClient
+from services.figma_client import FigmaClient, FigmaRateLimitError
 from services.figma_parser import build_design_context
 from services.ai_generator import generate_analysis_and_tests
 from services.exporters import (
