@@ -133,11 +133,13 @@ def to_markdown(result: Dict[str, Any]) -> str:
         lines.append("")
         lines.append("| Step | Action | Data | Expected Result |")
         lines.append("|---:|---|---|---|")
+
         for idx, step in enumerate(case.get("steps", []), start=1):
             action = _escape_md(step.get("action", ""))
             data = _escape_md(step.get("data", ""))
             expected = _escape_md(step.get("expected_result", ""))
             lines.append(f"| {idx} | {action} | {data} | {expected} |")
+
         lines.append("")
 
     lines.append("## 11. Üretim Notları")
@@ -151,13 +153,12 @@ def to_markdown(result: Dict[str, Any]) -> str:
 def to_pdf_bytes(result: Dict[str, Any]) -> bytes:
     """
     Analiz dokümanını PDF olarak üretir.
-    Türkçe karakter desteği için mümkünse DejaVuSans fontunu kullanır.
+    Türkçe karakter desteği için DejaVu normal + bold font ailesi register edilir.
     """
     result = normalize_result(result)
     analysis = result["analysis_document"]
 
     buffer = io.BytesIO()
-
     font_name = _register_pdf_font()
 
     doc = SimpleDocTemplate(
@@ -193,12 +194,14 @@ def to_pdf_bytes(result: Dict[str, Any]) -> bytes:
     story.append(Paragraph("4. Ekran Analizi", styles["Heading1"]))
     for screen in analysis.get("screens", []):
         story.append(Paragraph(_xml(screen.get("name", "")), styles["Heading2"]))
-        story.append(Paragraph(f"<b>Amaç:</b> {_xml(screen.get('purpose', ''))}", styles["Body"]))
 
-        story.append(Paragraph("<b>Görünen Elementler:</b>", styles["Body"]))
+        purpose_text = f"Amaç: {screen.get('purpose', '')}"
+        story.append(Paragraph(_xml(purpose_text), styles["Body"]))
+
+        story.append(Paragraph("Görünen Elementler:", styles["SmallBold"]))
         _add_bullets(story, screen.get("visible_elements", []), styles)
 
-        story.append(Paragraph("<b>Etkileşimler:</b>", styles["Body"]))
+        story.append(Paragraph("Etkileşimler:", styles["SmallBold"]))
         _add_bullets(story, screen.get("interactions", []), styles)
 
         story.append(Spacer(1, 0.2 * cm))
@@ -208,12 +211,10 @@ def to_pdf_bytes(result: Dict[str, Any]) -> bytes:
         heading = f"{req.get('id', '')} - {req.get('title', '')}"
         story.append(Paragraph(_xml(heading), styles["Heading2"]))
         story.append(Paragraph(_xml(req.get("description", "")), styles["Body"]))
-        story.append(
-            Paragraph(
-                f"<b>Kaynak Güveni:</b> {_xml(req.get('source_confidence', ''))}",
-                styles["Small"],
-            )
-        )
+
+        confidence = f"Kaynak Güveni: {req.get('source_confidence', '')}"
+        story.append(Paragraph(_xml(confidence), styles["Small"]))
+
         story.append(Spacer(1, 0.2 * cm))
 
     story.append(Paragraph("6. İş Kuralları", styles["Heading1"]))
@@ -225,8 +226,10 @@ def to_pdf_bytes(result: Dict[str, Any]) -> bytes:
     story.append(Paragraph("7. Ekran Akışları", styles["Heading1"]))
     for flow in analysis.get("screen_flows", []):
         story.append(Paragraph(_xml(flow.get("flow_name", "")), styles["Heading2"]))
+
         for index, step in enumerate(flow.get("steps", []), start=1):
             story.append(Paragraph(f"{index}. {_xml(step)}", styles["Body"]))
+
         story.append(Spacer(1, 0.2 * cm))
 
     story.append(Paragraph("8. Açık Noktalar / Analist Onayı Gerekenler", styles["Heading1"]))
@@ -249,12 +252,15 @@ def to_pdf_bytes(result: Dict[str, Any]) -> bytes:
             )
         )
 
-        meta = (
-            f"<b>Priority:</b> {_xml(case.get('priority', ''))} &nbsp;&nbsp; "
-            f"<b>Precondition:</b> {_xml(case.get('precondition', ''))} &nbsp;&nbsp; "
-            f"<b>Confidence:</b> {_xml(case.get('source_confidence', ''))}"
-        )
-        story.append(Paragraph(meta, styles["Small"]))
+        meta_lines = [
+            f"Priority: {case.get('priority', '')}",
+            f"Precondition: {case.get('precondition', '')}",
+            f"Confidence: {case.get('source_confidence', '')}",
+        ]
+
+        for meta in meta_lines:
+            story.append(Paragraph(_xml(meta), styles["Small"]))
+
         story.append(Spacer(1, 0.15 * cm))
 
         table_data = [
@@ -393,26 +399,85 @@ def test_cases_to_dataframe(result: Dict[str, Any]) -> pd.DataFrame:
 
 def _register_pdf_font() -> str:
     """
-    Streamlit Cloud/Linux ortamında genelde DejaVu fontu vardır.
-    Windows lokal çalıştırmada Arial denenir.
-    Bulunamazsa Helvetica fallback olur, ama Türkçe karakterlerde sorun yaşanabilir.
+    Türkçe karakterler için DejaVu font ailesini register eder.
+    Özellikle bold kullanımlarında Türkçe karakterlerin kareleşmemesi için
+    normal + bold + italic + bold italic family birlikte tanımlanır.
     """
-    font_candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "C:/Windows/Fonts/calibri.ttf",
-        "/Library/Fonts/Arial.ttf",
+
+    font_sets = [
+        {
+            "normal": "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "bold": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "italic": "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+            "bold_italic": "/usr/share/fonts/truetype/dejavu/DejaVuSans-BoldOblique.ttf",
+        },
+        {
+            "normal": "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+            "bold": "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
+            "italic": "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Oblique.ttf",
+            "bold_italic": "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-BoldOblique.ttf",
+        },
+        {
+            "normal": "C:/Windows/Fonts/arial.ttf",
+            "bold": "C:/Windows/Fonts/arialbd.ttf",
+            "italic": "C:/Windows/Fonts/ariali.ttf",
+            "bold_italic": "C:/Windows/Fonts/arialbi.ttf",
+        },
+        {
+            "normal": "C:/Windows/Fonts/calibri.ttf",
+            "bold": "C:/Windows/Fonts/calibrib.ttf",
+            "italic": "C:/Windows/Fonts/calibrii.ttf",
+            "bold_italic": "C:/Windows/Fonts/calibriz.ttf",
+        },
+        {
+            "normal": "/Library/Fonts/Arial.ttf",
+            "bold": "/Library/Fonts/Arial Bold.ttf",
+            "italic": "/Library/Fonts/Arial Italic.ttf",
+            "bold_italic": "/Library/Fonts/Arial Bold Italic.ttf",
+        },
     ]
 
-    for path in font_candidates:
-        if os.path.exists(path):
-            font_name = "AppUnicodeFont"
-            if font_name not in pdfmetrics.getRegisteredFontNames():
-                pdfmetrics.registerFont(TTFont(font_name, path))
-            return font_name
+    for font_set in font_sets:
+        normal = font_set["normal"]
+        bold = font_set["bold"]
+        italic = font_set["italic"]
+        bold_italic = font_set["bold_italic"]
 
-    return "Helvetica"
+        if os.path.exists(normal) and os.path.exists(bold):
+            family_name = "AppUnicodeFont"
+            registered = pdfmetrics.getRegisteredFontNames()
+
+            regular_name = f"{family_name}-Regular"
+            bold_name = f"{family_name}-Bold"
+            italic_name = f"{family_name}-Italic"
+            bold_italic_name = f"{family_name}-BoldItalic"
+
+            if regular_name not in registered:
+                pdfmetrics.registerFont(TTFont(regular_name, normal))
+
+            if bold_name not in registered:
+                pdfmetrics.registerFont(TTFont(bold_name, bold))
+
+            if os.path.exists(italic) and italic_name not in registered:
+                pdfmetrics.registerFont(TTFont(italic_name, italic))
+
+            if os.path.exists(bold_italic) and bold_italic_name not in registered:
+                pdfmetrics.registerFont(TTFont(bold_italic_name, bold_italic))
+
+            pdfmetrics.registerFontFamily(
+                family_name,
+                normal=regular_name,
+                bold=bold_name,
+                italic=italic_name if os.path.exists(italic) else regular_name,
+                boldItalic=bold_italic_name if os.path.exists(bold_italic) else bold_name,
+            )
+
+            return family_name
+
+    raise RuntimeError(
+        "PDF için Türkçe karakter destekli font bulunamadı. "
+        "Streamlit Cloud kullanıyorsan repo ana dizinine packages.txt ekleyip içine fonts-dejavu-core yaz."
+    )
 
 
 def _build_pdf_styles(font_name: str) -> Dict[str, ParagraphStyle]:
@@ -467,6 +532,16 @@ def _build_pdf_styles(font_name: str) -> Dict[str, ParagraphStyle]:
             textColor=colors.HexColor("#546E7A"),
             spaceAfter=5,
         ),
+        "SmallBold": ParagraphStyle(
+            "CustomSmallBold",
+            parent=base["BodyText"],
+            fontName=font_name,
+            fontSize=8.5,
+            leading=11,
+            textColor=colors.HexColor("#37474F"),
+            spaceBefore=4,
+            spaceAfter=3,
+        ),
         "TableHeader": ParagraphStyle(
             "CustomTableHeader",
             parent=base["BodyText"],
@@ -496,8 +571,9 @@ def _add_bullets(story: list, items: List[str], styles: Dict[str, ParagraphStyle
 
 def _xml(value: Any) -> str:
     text = "" if value is None else str(value)
+    text = escape(text, {"\"": "&quot;", "'": "&#39;"})
     text = text.replace("\n", "<br/>")
-    return escape(text, {"\"": "&quot;", "'": "&#39;"})
+    return text
 
 
 def _escape_md(value: str) -> str:
