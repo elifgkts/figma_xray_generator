@@ -12,6 +12,7 @@ def build_jira_context(issue_bundle: Dict[str, Any]) -> Dict[str, Any]:
     fields = issue.get("fields", {})
     comments = issue_bundle.get("comments", [])
     remote_links = issue_bundle.get("remote_links", [])
+    attachment_contents = issue_bundle.get("attachment_contents", [])
 
     description_text = extract_text_from_jira_value(fields.get("description"))
     comment_texts = [extract_text_from_jira_value(c.get("body")) for c in comments]
@@ -27,6 +28,27 @@ def build_jira_context(issue_bundle: Dict[str, Any]) -> Dict[str, Any]:
         att.get("filename", "")
         for att in fields.get("attachment", []) or []
         if att.get("filename")
+    ]
+
+    extracted_attachment_texts = []
+    for item in attachment_contents:
+        if item.get("supported") and item.get("text"):
+            extracted_attachment_texts.append(
+                {
+                    "filename": item.get("filename", ""),
+                    "mime_type": item.get("mime_type", ""),
+                    "size_bytes": item.get("size_bytes", 0),
+                    "text": item.get("text", ""),
+                }
+            )
+
+    attachment_processing_summary = [
+        {
+            "filename": item.get("filename", ""),
+            "supported": item.get("supported", False),
+            "reason": item.get("reason", ""),
+        }
+        for item in attachment_contents
     ]
 
     issuelink_summaries = []
@@ -59,6 +81,7 @@ def build_jira_context(issue_bundle: Dict[str, Any]) -> Dict[str, Any]:
         "\n".join(comment_texts),
         "\n".join(item["text"] for item in custom_field_texts),
         "\n".join(attachment_names),
+        "\n".join(item["text"] for item in extracted_attachment_texts if item.get("text")),
         "\n".join(f"{x['key']} {x['summary']}" for x in issuelink_summaries),
         "\n".join(x["url"] for x in remote_urls),
     ]
@@ -78,6 +101,8 @@ def build_jira_context(issue_bundle: Dict[str, Any]) -> Dict[str, Any]:
         "comments": [text for text in comment_texts if text.strip()],
         "custom_fields": custom_field_texts,
         "attachments": attachment_names,
+        "attachment_texts": extracted_attachment_texts,
+        "attachment_processing_summary": attachment_processing_summary,
         "linked_issues": issuelink_summaries,
         "remote_links": remote_urls,
         "extracted_urls": extracted_urls,
@@ -85,6 +110,7 @@ def build_jira_context(issue_bundle: Dict[str, Any]) -> Dict[str, Any]:
             "comment_count": len(comment_texts),
             "custom_field_count": len(custom_field_texts),
             "attachment_count": len(attachment_names),
+            "attachment_text_count": len(extracted_attachment_texts),
             "linked_issue_count": len(issuelink_summaries),
             "remote_link_count": len(remote_urls),
             "url_count": len(extracted_urls),
