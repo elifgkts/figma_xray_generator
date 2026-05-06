@@ -79,6 +79,11 @@ def generate_analysis_and_tests(
     image_url: Optional[str] = None,
     image_urls: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
+    """
+    Verilen context ve opsiyonel görsellerden
+    analiz dokümanı + Xray test case JSON çıktısı üretir.
+    """
+
     if not openai_api_key:
         raise ValueError(
             "OPENAI_API_KEY bulunamadı. "
@@ -148,32 +153,19 @@ Bağlam Özeti:
         )
 
     except AuthenticationError as exc:
-        raise RuntimeError(
-            "OpenAI API key geçersiz görünüyor. "
-            "Lütfen OPENAI_API_KEY değerini kontrol et."
-        ) from exc
+        raise RuntimeError(f"OpenAI AuthenticationError: {exc}") from exc
 
     except RateLimitError as exc:
-        raise RuntimeError(
-            "OpenAI rate limit veya kota sınırına takıldı. "
-            "Bir süre bekleyip tekrar dene."
-        ) from exc
+        raise RuntimeError(f"OpenAI RateLimitError: {exc}") from exc
 
     except BadRequestError as exc:
-        raise RuntimeError(
-            "OpenAI isteği geçersiz görünüyor. "
-            f"Kullanılan model: {model}"
-        ) from exc
+        raise RuntimeError(f"OpenAI BadRequestError: {exc}") from exc
 
     except APIConnectionError as exc:
-        raise RuntimeError(
-            "OpenAI API bağlantısı kurulamadı."
-        ) from exc
+        raise RuntimeError(f"OpenAI APIConnectionError: {exc}") from exc
 
     except APIError as exc:
-        raise RuntimeError(
-            "OpenAI tarafında geçici bir hata oluştu."
-        ) from exc
+        raise RuntimeError(f"OpenAI APIError: {exc}") from exc
 
     output_text = getattr(response, "output_text", None)
 
@@ -198,6 +190,11 @@ def generate_analysis_and_tests_for_image_batches(
     image_urls: List[str],
     batch_size: int = 6,
 ) -> Dict[str, Any]:
+    """
+    Çok sayıda görsel varsa hepsini batch batch analiz eder,
+    sonra sonuçları tek analiz çıktısında birleştirir.
+    """
+
     if not image_urls:
         return generate_analysis_and_tests(
             openai_api_key=openai_api_key,
@@ -208,7 +205,6 @@ def generate_analysis_and_tests_for_image_batches(
 
     total_images = len(image_urls)
     total_batches = math.ceil(total_images / batch_size)
-
     batch_results: List[Dict[str, Any]] = []
 
     for batch_index in range(total_batches):
@@ -253,6 +249,10 @@ def merge_batch_results_locally(
     total_images: int,
     total_batches: int,
 ) -> Dict[str, Any]:
+    """
+    Batch sonuçlarını lokal olarak birleştirir.
+    """
+
     combined = {
         "analysis_document": {
             "title": "Çok Kaynaklı Analiz ve Gereksinim Dokümanı",
@@ -383,6 +383,9 @@ def merge_batch_results_locally(
 
 
 def prepare_context_for_prompt(context: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Modele daha okunabilir ve kompakt context verir.
+    """
     prepared = copy.deepcopy(context)
 
     if prepared.get("source") == "merged_multi_source_context":
