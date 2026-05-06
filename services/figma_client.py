@@ -1,16 +1,8 @@
 import re
-import time
-from dataclasses import dataclass
-from typing import Optional
-from urllib.parse import urlparse, parse_qs, unquote
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, unquote, urlparse
 
 import requests
-
-
-@dataclass
-class FigmaReference:
-    file_key: str
-    node_id: Optional[str]
 
 
 class FigmaRateLimitError(Exception):
@@ -18,298 +10,228 @@ class FigmaRateLimitError(Exception):
         self,
         message: str,
         retry_after: Optional[int] = None,
+        upgrade_link: Optional[str] = None,
         plan_tier: Optional[str] = None,
         rate_limit_type: Optional[str] = None,
-        upgrade_link: Optional[str] = None
     ):
         super().__init__(message)
         self.retry_after = retry_after
+        self.upgrade_link = upgrade_link
         self.plan_tier = plan_tier
         self.rate_limit_type = rate_limit_type
-        self.upgrade_link = upgrade_link
 
 
 class FigmaClient:
-    def __init__(
-        self,
-        token: str,
-        timeout: int = 30,
-        max_retries: int = 2,
-        max_retry_wait_seconds: int = 30
-    ):
+    def __init__(self, token: str, timeout: int = 30):
         if not token:
-            raise ValueError("FIGMA_TOKEN bulunamadı.")
-
+            raise ValueError("Figma token gerekli.")
         self.token = token
         self.timeout = timeout
-        self.max_retries = max_retries
-        self.max_retry_wait_seconds = max_retry_wait_seconds
         self.base_url = "https://api.figma.com/v1"
-        self.headers = {
-            "X-Figma-Token": self.token
-        }
+        self.session = requests.Session()
+        self.session.headers.update(
+            {
+                "X-Figma-Token": token,
+                "Accept": "application/json",
+            }
+        )
+
+    def _request_json(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        url = f"{self.base_url}{path}"
+        response = self.session.get(url, params=params, timeout=self.timeout)
+
+        if response.status_code == 429:
+            raise self._build_rate_limit_error(response)
+
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            body = ""
+            try:
+                body = response.text[:1000]
+            except Exception:
+                body = ""
+            raise RuntimeError(
+                f"Figma API hatası: HTTP {response.status_code}. {body}"
+            ) from exc
+
+        return response.json()
+
+    def _build_rate_limit_error(self, response: requests.Response) -> FigmaRateLimitError:
+        retry_after_raw = response.headers.get("Retry-After")
+        retry_after = None
+        if retry_after_raw:
+            try:
+                retry_after = int(float(retry_after_raw))
+            except Exception:
+                retry_after = None
+
+        plan_tier = response.headers.get("X-Figma-Plan-Tier")
+        rate_limit_type = response.headers.get("X-Figma-Rate-Limit-Type")
+        upgrade_link = (
+            response.headers.get("X-Figma-Upgrade-Link")
+            or response.headers.get("X-Upgrade-Link")
+            or None
+        )
+
+        msg_parts = [
+            "Figma API rate limit'e takıldı.",
+            "Kısa sürede çok fazla istek atılmış olabilir veya dosyanın bulunduğu plan/seat limiti dolmuş olabilir.",
+        ]
+
+        if retry_after is not None:
+            msg_parts.append(f"Figma tekrar denemek için yaklaşık {retry_after} saniye beklenmesini istiyor.")
+
+        if plan_tier:
+            msg_parts.append(f"Plan tier: {plan_tier}")
+
+        if rate_limit_type:
+            msg_parts.append(f"Rate limit tipi: {rate_limit_type}")
+
+        msg_parts.append(
+            "Bir süre bekleyip tekrar deneyebilirsin. Aynı linke art arda basmamak ve önce ekran listesini tarayıp tek frame seçmek daha sağlıklı olur."
+        )
+
+        return FigmaRateLimitError(
+            message=" ".join(msg_parts),
+            retry_after=retry_after,
+            upgrade_link=upgrade_link,
+            plan_tier=plan_tier,
+            rate_limit_type=rate_limit_type,
+        )
 
     @staticmethod
-    def extract_reference(figma_url: str) -> FigmaReference:
-        """
-        Desteklenen örnekler:
-        - https://www.figma.com/design/{file_key}/...
-        - https://www.figma.com/file/{file_key}/...
-        - node-id=123-456
-        - node-id=123%3A456
-        """
+    def extract_file_key_and_node_id(figma_url: str) -> Tuple[str, Optional[str]]:
         if not figma_url:
-            raise ValueError("Figma URL boş olamaz.")
+            raise ValueError("Figma linki boş olamaz.")
 
         parsed = urlparse(figma_url)
-        path_parts = [p for p in parsed.path.split("/") if p]
+        path = parsed.path or ""
 
-        file_key = None
+        match = re.search(r"/(?:design|file|proto)/([a-zA-Z0-9]+)", path)
+        if not match:
+            raise ValueError("Figma linkinden file key çıkarılamadı.")
 
-        for marker in ["design", "file"]:
-            if marker in path_parts:
-                idx = path_parts.index(marker)
-                if len(path_parts) > idx + 1:
-                    file_key = path_parts[idx + 1]
-                    break
-
-        if not file_key:
-            match = re.search(r"/(?:design|file)/([^/]+)", figma_url)
-            if match:
-                file_key = match.group(1)
-
-        if not file_key:
-            raise ValueError(
-                "Figma file key bulunamadı. Link /design/{key}/ veya /file/{key}/ formatında olmalı."
-            )
+        file_key = match.group(1)
 
         query = parse_qs(parsed.query)
         node_id = None
 
         if "node-id" in query and query["node-id"]:
-            node_id = unquote(query["node-id"][0])
-        else:
-            match = re.search(r"node-id=([^&]+)", figma_url)
-            if match:
-                node_id = unquote(match.group(1))
+            raw = unquote(query["node-id"][0]).strip()
+            node_id = raw.replace("-", ":") if ":" not in raw else raw
 
-        if node_id:
-            node_id = node_id.replace("-", ":")
+        return file_key, node_id
 
-        return FigmaReference(file_key=file_key, node_id=node_id)
-
-    def _request(self, url: str, params: Optional[dict] = None) -> dict:
-        attempt = 0
-
-        while True:
-            response = requests.get(
-                url,
-                headers=self.headers,
-                params=params,
-                timeout=self.timeout
-            )
-
-            if response.status_code != 429:
-                response.raise_for_status()
-                return response.json()
-
-            retry_after = self._read_int_header(response, "Retry-After")
-            plan_tier = response.headers.get("X-Figma-Plan-Tier")
-            rate_limit_type = response.headers.get("X-Figma-Rate-Limit-Type")
-            upgrade_link = response.headers.get("X-Figma-Upgrade-Link")
-
-            if attempt >= self.max_retries:
-                raise FigmaRateLimitError(
-                    message=self._build_rate_limit_message(
-                        retry_after=retry_after,
-                        plan_tier=plan_tier,
-                        rate_limit_type=rate_limit_type
-                    ),
-                    retry_after=retry_after,
-                    plan_tier=plan_tier,
-                    rate_limit_type=rate_limit_type,
-                    upgrade_link=upgrade_link
-                )
-
-            wait_seconds = retry_after if retry_after is not None else 3
-
-            if wait_seconds > self.max_retry_wait_seconds:
-                raise FigmaRateLimitError(
-                    message=self._build_rate_limit_message(
-                        retry_after=retry_after,
-                        plan_tier=plan_tier,
-                        rate_limit_type=rate_limit_type
-                    ),
-                    retry_after=retry_after,
-                    plan_tier=plan_tier,
-                    rate_limit_type=rate_limit_type,
-                    upgrade_link=upgrade_link
-                )
-
-            time.sleep(wait_seconds)
-            attempt += 1
-
-    @staticmethod
-    def _read_int_header(response: requests.Response, header_name: str) -> Optional[int]:
-        value = response.headers.get(header_name)
-        if value is None:
-            return None
-
-        try:
-            return int(value)
-        except ValueError:
-            return None
-
-    @staticmethod
-    def _build_rate_limit_message(
-        retry_after: Optional[int],
-        plan_tier: Optional[str],
-        rate_limit_type: Optional[str]
-    ) -> str:
-        parts = [
-            "Figma API rate limit'e takıldı. Kısa sürede çok fazla istek atılmış olabilir veya dosyanın bulunduğu plan/seat limiti dolmuş olabilir."
-        ]
-
-        if retry_after is not None:
-            parts.append(f"Figma tekrar denemek için yaklaşık {retry_after} saniye beklenmesini istiyor.")
-
-        if plan_tier:
-            parts.append(f"Plan tier: {plan_tier}")
-
-        if rate_limit_type:
-            parts.append(f"Rate limit tipi: {rate_limit_type}")
-
-        parts.append(
-            "Bir süre bekleyip tekrar deneyebilirsin. Aynı linke art arda basmamak ve önce ekran listesini tarayıp tek frame seçmek daha sağlıklı olur."
-        )
-
-        return " ".join(parts)
-
-    def get_file(self, file_key: str) -> dict:
-        url = f"{self.base_url}/files/{file_key}"
-        return self._request(url)
-
-    def get_file_outline(self, file_key: str, depth: int = 2) -> dict:
-        url = f"{self.base_url}/files/{file_key}"
-        return self._request(
-            url,
-            params={"depth": depth}
-        )
-
-    def get_file_subset_by_node(
-        self,
-        file_key: str,
-        node_id: str,
-        depth: Optional[int] = None
-    ) -> dict:
-        url = f"{self.base_url}/files/{file_key}"
-
-        params = {
-            "ids": node_id
-        }
-
+    def get_file(self, file_key: str, depth: Optional[int] = None) -> Dict[str, Any]:
+        params = {}
         if depth is not None:
             params["depth"] = depth
+        return self._request_json(f"/files/{file_key}", params=params)
 
-        return self._request(
-            url,
-            params=params
-        )
+    def get_nodes(
+        self,
+        file_key: str,
+        node_ids: List[str],
+        depth: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "ids": ",".join(node_ids),
+        }
+        if depth is not None:
+            params["depth"] = depth
+        return self._request_json(f"/files/{file_key}/nodes", params=params)
 
-    def get_node(self, file_key: str, node_id: str) -> dict:
-        url = f"{self.base_url}/files/{file_key}/nodes"
-        return self._request(
-            url,
-            params={"ids": node_id}
-        )
-
-    def get_node_image_url(
+    def get_image_url(
         self,
         file_key: str,
         node_id: str,
-        scale: int = 1,
-        image_format: str = "png"
+        scale: int = 2,
+        fmt: str = "png",
     ) -> Optional[str]:
-        url = f"{self.base_url}/images/{file_key}"
-        data = self._request(
-            url,
+        data = self._request_json(
+            f"/images/{file_key}",
             params={
                 "ids": node_id,
-                "format": image_format,
-                "scale": scale
-            }
+                "scale": scale,
+                "format": fmt,
+            },
         )
-
         images = data.get("images", {})
         return images.get(node_id)
 
-    def get_design_outline_payload(self, figma_url: str, depth: int = 2) -> dict:
-        ref = self.extract_reference(figma_url)
-        outline_data = self.get_file_outline(ref.file_key, depth=depth)
+    def get_design_outline_payload(self, figma_url: str, depth: int = 3) -> Dict[str, Any]:
+        file_key, node_id = self.extract_file_key_and_node_id(figma_url)
+        file_data = self.get_file(file_key, depth=depth)
 
         return {
-            "file_key": ref.file_key,
-            "node_id": ref.node_id,
-            "raw": outline_data,
-            "node_tree": outline_data.get("document")
+            "file_key": file_key,
+            "file_name": file_data.get("name", ""),
+            "node_id": node_id,
+            "node_tree": file_data.get("document", {}),
+            "raw": file_data,
         }
 
     def get_design_payload(
         self,
         figma_url: str,
         include_image: bool = False,
-        selected_node_id: Optional[str] = None
-    ) -> dict:
-        ref = self.extract_reference(figma_url)
-        target_node_id = selected_node_id or ref.node_id
+        selected_node_id: Optional[str] = None,
+        depth: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        file_key, url_node_id = self.extract_file_key_and_node_id(figma_url)
+        node_id = selected_node_id or url_node_id
+        image_url = None
 
-        if target_node_id:
-            file_data = self.get_file_subset_by_node(
-                ref.file_key,
-                target_node_id
+        if node_id:
+            nodes_data = self.get_nodes(
+                file_key=file_key,
+                node_ids=[node_id],
+                depth=depth,
             )
+            node_tree = self._extract_single_node_document(nodes_data, node_id)
 
-            image_url = None
             if include_image:
-                image_url = self.get_node_image_url(
-                    ref.file_key,
-                    target_node_id
-                )
-
-            node_tree = self._find_node_by_id(
-                file_data.get("document"),
-                target_node_id
-            )
+                try:
+                    image_url = self.get_image_url(file_key, node_id)
+                except Exception:
+                    image_url = None
 
             return {
-                "file_key": ref.file_key,
-                "node_id": target_node_id,
+                "file_key": file_key,
+                "file_name": "",
+                "node_id": node_id,
+                "node_tree": node_tree,
                 "image_url": image_url,
-                "raw": file_data,
-                "node_tree": node_tree or file_data.get("document")
+                "raw": nodes_data,
             }
 
-        file_data = self.get_file(ref.file_key)
+        file_data = self.get_file(file_key, depth=depth)
+        node_tree = file_data.get("document", {})
 
         return {
-            "file_key": ref.file_key,
+            "file_key": file_key,
+            "file_name": file_data.get("name", ""),
             "node_id": None,
-            "image_url": None,
+            "node_tree": node_tree,
+            "image_url": image_url,
             "raw": file_data,
-            "node_tree": file_data.get("document")
         }
 
     @staticmethod
-    def _find_node_by_id(node: Optional[dict], target_id: str) -> Optional[dict]:
-        if not node:
-            return None
+    def _extract_single_node_document(nodes_data: Dict[str, Any], node_id: str) -> Dict[str, Any]:
+        nodes = nodes_data.get("nodes", {})
+        node_entry = nodes.get(node_id)
 
-        if node.get("id") == target_id:
-            return node
+        if not node_entry:
+            if nodes:
+                first_entry = next(iter(nodes.values()))
+                if isinstance(first_entry, dict) and first_entry.get("document"):
+                    return first_entry["document"]
+            raise ValueError(f"Figma nodes response içinde {node_id} bulunamadı.")
 
-        for child in node.get("children", []) or []:
-            found = FigmaClient._find_node_by_id(child, target_id)
-            if found:
-                return found
+        document = node_entry.get("document")
+        if not document:
+            raise ValueError(f"Figma node document alanı boş döndü: {node_id}")
 
-        return None
+        return document
