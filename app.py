@@ -27,6 +27,8 @@ from services.confluence_client import ConfluenceClient, ConfluenceAuthConfig
 from services.link_resolver import resolve_urls
 from services.context_merger import merge_source_contexts
 from services.analysis_doc_parser import extract_text_from_upload, build_analysis_doc_context
+from services.jira_audit import build_audit_jql, audit_issues_from_search_results
+from services.project_catalog import PROJECT_GROUPS, PROJECT_LABELS
 
 load_dotenv()
 
@@ -66,6 +68,13 @@ def init_state() -> None:
     st.session_state.setdefault("editable_json_text", "")
     st.session_state.setdefault("figma_candidates", [])
     st.session_state.setdefault("figma_file_key", None)
+    st.session_state.setdefault("audit_df", None)
+    st.session_state.setdefault("audit_csv", None)
+
+
+def clear_audit_state() -> None:
+    st.session_state.audit_df = None
+    st.session_state.audit_csv = None
 
 
 def show_header() -> None:
@@ -84,7 +93,8 @@ def show_sidebar() -> Dict[str, Any]:
     default_model = get_secret("OPENAI_MODEL", "gpt-4o")
 
     st.sidebar.subheader("🔐 Kullanıcı Tokenları")
-    st.sidebar.caption("Bu alana girilen tokenlar sadece mevcut oturumda kullanılır.")
+    st.sidebar.caption(
+        "Bu alana girilen tokenlar sadece mevcut oturumda kullanılır.")
 
     user_figma_token = st.sidebar.text_input(
         "Figma Personal Access Token",
@@ -193,7 +203,8 @@ def show_sidebar() -> Dict[str, Any]:
         confluence_deployment = st.sidebar.selectbox(
             "Confluence Deployment",
             options=["dc", "cloud"],
-            index=0 if get_secret("CONFLUENCE_DEPLOYMENT", jira_deployment) == "dc" else 1,
+            index=0 if get_secret("CONFLUENCE_DEPLOYMENT",
+                                  jira_deployment) == "dc" else 1,
         )
 
         confluence_email = st.sidebar.text_input(
@@ -297,11 +308,7 @@ def uploaded_images_to_data_urls(uploaded_files: List[Any]) -> List[str]:
     return [uploaded_image_to_data_url(file) for file in limited_files]
 
 
-def build_screenshot_context(
-    uploaded_files: List[Any],
-    user_notes: str,
-    mode: str,
-) -> dict:
+def build_screenshot_context(uploaded_files: List[Any], user_notes: str, mode: str) -> dict:
     files = uploaded_files[:MAX_SCREENSHOTS] if uploaded_files else []
     screenshots = []
 
@@ -381,7 +388,7 @@ def shrink_context_for_model(value: Any) -> Any:
         return [shrink_context_for_model(v) for v in value]
     if isinstance(value, str):
         if len(value) > MAX_CONTEXT_STR_LEN:
-            return value[:MAX_CONTEXT_STR_LEN] + "\n...[TRUNCATED]..."
+            return value[:MAX_CONTEXT_STR_LEN] + "\\n...[TRUNCATED]..."
         return value
     return value
 
@@ -398,9 +405,11 @@ def handle_figma_scan(figma_url: str, figma_token: str) -> None:
     try:
         with st.spinner("Figma dosyasındaki ekranlar taranıyor..."):
             figma_client = FigmaClient(figma_token)
-            outline_payload = figma_client.get_design_outline_payload(figma_url, depth=3)
+            outline_payload = figma_client.get_design_outline_payload(
+                figma_url, depth=3)
             candidates = extract_candidate_frames(outline_payload)
-            st.session_state["figma_file_key"] = outline_payload.get("file_key")
+            st.session_state["figma_file_key"] = outline_payload.get(
+                "file_key")
             st.session_state["figma_candidates"] = candidates
 
         if candidates:
@@ -426,7 +435,8 @@ def show_candidate_selector() -> Optional[str]:
         st.divider()
         st.subheader("Bulunan Figma Ekranları")
 
-        candidate_labels = [item["label"] for item in st.session_state["figma_candidates"]]
+        candidate_labels = [item["label"]
+                            for item in st.session_state["figma_candidates"]]
 
         selected_label = st.selectbox(
             "Analiz edilecek ekran/frame seç",
@@ -456,6 +466,8 @@ def handle_figma_or_screenshot_generation(
     uploaded_screenshots: List[Any],
     user_notes: str,
 ) -> None:
+    clear_audit_state()
+
     uses_figma = mode in ["Figma API Modu", "Hibrit Mod"]
     uses_screenshot = mode in ["Screenshot Modu", "Hibrit Mod"]
 
@@ -495,7 +507,8 @@ def handle_figma_or_screenshot_generation(
 
         if uses_screenshot:
             with st.spinner("Ekran görüntüleri hazırlanıyor..."):
-                image_data_urls = uploaded_images_to_data_urls(uploaded_screenshots)
+                image_data_urls = uploaded_images_to_data_urls(
+                    uploaded_screenshots)
 
             if not design_context:
                 design_context = build_screenshot_context(
@@ -542,7 +555,8 @@ def handle_figma_or_screenshot_generation(
                 )
 
         st.session_state.result_json = result
-        st.session_state.editable_json_text = json.dumps(result, ensure_ascii=False, indent=2)
+        st.session_state.editable_json_text = json.dumps(
+            result, ensure_ascii=False, indent=2)
         st.success("Analiz ve test case üretimi tamamlandı.")
 
     except FigmaRateLimitError as exc:
@@ -575,11 +589,9 @@ def build_figma_contexts_from_resolved_links(resolved: Dict[str, Any]) -> List[D
     return figma_contexts
 
 
-def handle_jira_task_generation(
-    issue_key: str,
-    settings: Dict[str, Any],
-    user_notes: str,
-) -> None:
+def handle_jira_task_generation(issue_key: str, settings: Dict[str, Any], user_notes: str) -> None:
+    clear_audit_state()
+
     if not issue_key:
         st.error("Lütfen Jira issue key gir.")
         st.stop()
@@ -643,7 +655,8 @@ def handle_jira_task_generation(
             )
 
         st.session_state.result_json = result
-        st.session_state.editable_json_text = json.dumps(result, ensure_ascii=False, indent=2)
+        st.session_state.editable_json_text = json.dumps(
+            result, ensure_ascii=False, indent=2)
         st.success("Jira task modunda üretim tamamlandı.")
 
     except Exception as exc:
@@ -651,12 +664,9 @@ def handle_jira_task_generation(
         st.stop()
 
 
-def handle_analysis_doc_generation(
-    uploaded_docs: List[Any],
-    pasted_text: str,
-    settings: Dict[str, Any],
-    user_notes: str,
-) -> None:
+def handle_analysis_doc_generation(uploaded_docs: List[Any], pasted_text: str, settings: Dict[str, Any], user_notes: str) -> None:
+    clear_audit_state()
+
     if not settings["openai_key"]:
         st.error("OPENAI_API_KEY bulunamadı.")
         st.stop()
@@ -668,7 +678,8 @@ def handle_analysis_doc_generation(
     analysis_doc_contexts = []
 
     try:
-        limited_docs = uploaded_docs[:MAX_ANALYSIS_DOCS] if uploaded_docs else []
+        limited_docs = uploaded_docs[:MAX_ANALYSIS_DOCS] if uploaded_docs else [
+        ]
 
         for uploaded in limited_docs:
             text = extract_text_from_upload(uploaded.name, uploaded.getvalue())
@@ -676,7 +687,8 @@ def handle_analysis_doc_generation(
             analysis_doc_contexts.append(ctx)
 
         if pasted_text.strip():
-            ctx = build_analysis_doc_context(pasted_text, filename="Pasted Analysis Text")
+            ctx = build_analysis_doc_context(
+                pasted_text, filename="Pasted Analysis Text")
             analysis_doc_contexts.append(ctx)
 
         merged_context = merge_source_contexts(
@@ -698,11 +710,88 @@ def handle_analysis_doc_generation(
             )
 
         st.session_state.result_json = result
-        st.session_state.editable_json_text = json.dumps(result, ensure_ascii=False, indent=2)
+        st.session_state.editable_json_text = json.dumps(
+            result, ensure_ascii=False, indent=2)
         st.success("Analiz Dokümanı Modu tamamlandı.")
 
     except Exception as exc:
         st.error(f"Analiz Dokümanı Modu sırasında hata oluştu: {exc}")
+        st.stop()
+
+
+def handle_jira_audit_generation(
+    project_keys: List[str],
+    start_date,
+    end_date,
+    issue_types: List[str],
+    settings: Dict[str, Any],
+    max_issues: int,
+    include_attachment_contents: bool,
+) -> None:
+    st.session_state.result_json = None
+    st.session_state.editable_json_text = ""
+    st.session_state.design_context = None
+
+    if not project_keys:
+        st.error("Lütfen en az bir proje seç.")
+        st.stop()
+
+    try:
+        jira_client = build_jira_client(settings)
+        all_issues = []
+        per_project_limit = max(1, int(max_issues / max(1, len(project_keys))))
+
+        for project_key in project_keys:
+            jql = build_audit_jql(
+                project_key=project_key.strip(),
+                start_date=str(start_date),
+                end_date=str(end_date),
+                issue_types=issue_types,
+            )
+
+            with st.spinner(f"{project_key} için issue listesi Jira'dan çekiliyor..."):
+                issues = jira_client.search_issues_paginated(
+                    jql=jql,
+                    fields=[
+                        "summary",
+                        "description",
+                        "issuetype",
+                        "priority",
+                        "status",
+                        "created",
+                    ],
+                    limit=per_project_limit,
+                )
+                all_issues.extend(issues)
+
+        if not all_issues:
+            st.warning("Belirtilen filtrelerle issue bulunamadı.")
+            st.session_state.audit_df = None
+            st.session_state.audit_csv = None
+            return
+
+        unique_map = {}
+        for issue in all_issues:
+            key = issue.get("key")
+            if key:
+                unique_map[key] = issue
+
+        issues_to_analyze = list(unique_map.values())[:max_issues]
+
+        with st.spinner("Issue'lar analiz ediliyor..."):
+            df = audit_issues_from_search_results(
+                jira_client=jira_client,
+                issues=issues_to_analyze,
+                include_attachment_contents=include_attachment_contents,
+            )
+
+        st.session_state.audit_df = df
+        st.session_state.audit_csv = df.to_csv(
+            index=False, sep=";").encode("utf-8-sig")
+        st.success(f"{len(df)} issue analiz edildi.")
+
+    except Exception as exc:
+        st.error(f"Jira Analysis Audit Modu sırasında hata oluştu: {exc}")
         st.stop()
 
 
@@ -725,10 +814,8 @@ def show_analysis_context() -> None:
         metric_cols[4].metric("Link", summary.get("link_count", 0))
         metric_cols[5].metric("Component", summary.get("component_count", 0))
     else:
-        small_summary = {
-            k: v for k, v in summary.items()
-            if isinstance(v, (str, int, float, bool))
-        }
+        small_summary = {k: v for k, v in summary.items(
+        ) if isinstance(v, (str, int, float, bool))}
         if small_summary:
             cols = st.columns(min(len(small_summary), 4))
             for idx, (k, v) in enumerate(list(small_summary.items())[:4]):
@@ -821,6 +908,51 @@ def show_results_and_downloads() -> None:
         st.markdown(markdown_text)
 
 
+def show_audit_results() -> None:
+    if st.session_state.get("audit_df") is None:
+        return
+
+    df = st.session_state.audit_df
+
+    st.divider()
+    st.subheader("Jira Audit Sonuçları")
+
+    column_config = {}
+    if "Issue Link" in df.columns:
+        column_config["Issue Link"] = st.column_config.LinkColumn(
+            "Issue Link",
+            help="Issue'u Jira'da aç",
+            display_text="Aç",
+        )
+
+    st.data_editor(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        disabled=True,
+        column_config=column_config,
+    )
+
+    risky_df = df[df["Analiz Açısından Riskli"] ==
+                  "Evet"] if "Analiz Açısından Riskli" in df.columns else df.iloc[0:0]
+
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("Toplam Issue", len(df))
+    col_b.metric("Riskli Issue", len(risky_df))
+    col_c.metric(
+        "Ortalama Readiness",
+        round(float(df["Readiness Score"].mean()), 1) if len(df) > 0 else 0,
+    )
+
+    st.download_button(
+        label="📥 Jira Audit CSV İndir",
+        data=st.session_state.audit_csv,
+        file_name="jira_analysis_audit.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
 def main() -> None:
     init_state()
     show_header()
@@ -837,6 +969,7 @@ def main() -> None:
             "Hibrit Mod",
             "Jira Task Modu",
             "Analiz Dokümanı Modu",
+            "Jira Analysis Audit Modu",
         ],
         horizontal=False,
     )
@@ -850,6 +983,14 @@ def main() -> None:
     uploaded_docs: List[Any] = []
     pasted_analysis_text = ""
 
+    selected_group = "bip"
+    selected_projects: List[str] = []
+    audit_issue_types = ["Story", "Task"]
+    audit_start_date = None
+    audit_end_date = None
+    audit_max_issues = 100
+    audit_include_attachment_contents = False
+
     if mode in ["Figma API Modu", "Hibrit Mod"]:
         st.subheader("Figma Linki")
 
@@ -861,7 +1002,8 @@ def main() -> None:
         col_scan, col_info = st.columns([1, 4])
 
         with col_scan:
-            scan_button = st.button("Figma ekranlarını tara", use_container_width=True)
+            scan_button = st.button(
+                "Figma ekranlarını tara", use_container_width=True)
 
         with col_info:
             st.caption(
@@ -928,6 +1070,54 @@ def main() -> None:
             placeholder="Analiz dokümanı metnini buraya yapıştırabilirsin...",
         )
 
+    if mode == "Jira Analysis Audit Modu":
+        st.subheader("Jira Analysis Audit")
+
+        selected_group = st.selectbox(
+            "Ürün / Grup",
+            options=list(PROJECT_GROUPS.keys()),
+            format_func=lambda x: PROJECT_LABELS.get(x, x),
+        )
+
+        selected_projects = st.multiselect(
+            "Projeler",
+            options=PROJECT_GROUPS[selected_group],
+            default=PROJECT_GROUPS[selected_group],
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            audit_start_date = st.date_input("Başlangıç Tarihi")
+        with col2:
+            audit_end_date = st.date_input("Bitiş Tarihi")
+
+        audit_issue_types = st.multiselect(
+            "Issue Types",
+            options=["Story", "Task", "Bug", "Epic"],
+            default=["Story", "Task"],
+        )
+
+        col3, col4 = st.columns(2)
+        with col3:
+            audit_max_issues = st.number_input(
+                "Maksimum issue sayısı",
+                min_value=10,
+                max_value=1000,
+                value=100,
+                step=10,
+            )
+        with col4:
+            audit_include_attachment_contents = st.checkbox(
+                "Attachment içeriklerini de oku",
+                value=False,
+                help="Daha yavaş olabilir ama attachment içindeki bağlamı da kalite değerlendirmesine katabilir.",
+            )
+
+        st.caption(
+            "Bu mod, seçilen projelerde belirtilen tarih aralığındaki Story/Task issue'larını tarar ve "
+            "analiz dokümanı linki, Figma linki, açıklama kalitesi ve QA readiness durumunu tablo halinde gösterir."
+        )
+
     user_notes = st.text_area(
         "Ek bilgi / notlar",
         placeholder=(
@@ -974,8 +1164,20 @@ def main() -> None:
                 user_notes=user_notes,
             )
 
+        elif mode == "Jira Analysis Audit Modu":
+            handle_jira_audit_generation(
+                project_keys=selected_projects,
+                start_date=audit_start_date,
+                end_date=audit_end_date,
+                issue_types=audit_issue_types,
+                settings=settings,
+                max_issues=int(audit_max_issues),
+                include_attachment_contents=audit_include_attachment_contents,
+            )
+
     show_analysis_context()
     show_results_and_downloads()
+    show_audit_results()
 
 
 if __name__ == "__main__":
