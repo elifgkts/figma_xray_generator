@@ -1,8 +1,10 @@
 import base64
 import io
 import json
+import math
 import os
-from typing import Any, Optional, List
+from copy import deepcopy
+from typing import Any, Optional, List, Dict
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -21,6 +23,12 @@ from services.exporters import (
     to_json_bytes,
     test_cases_to_dataframe,
 )
+from services.jira_client import JiraClient, JiraAuthConfig
+from services.jira_parser import build_jira_context
+from services.confluence_client import ConfluenceClient, ConfluenceAuthConfig
+from services.link_resolver import resolve_urls
+from services.context_merger import merge_source_contexts
+from services.analysis_doc_parser import extract_text_from_upload, build_analysis_doc_context
 
 load_dotenv()
 
@@ -28,19 +36,17 @@ MAX_SCREENSHOTS = 60
 IMAGE_BATCH_SIZE = 6
 MAX_IMAGE_SIDE = 1600
 JPEG_QUALITY = 92
+MAX_CONTEXT_STR_LEN = 12000
+MAX_ANALYSIS_DOCS = 10
 
 st.set_page_config(
-    page_title="Figma / Screenshot → Analiz + Xray",
+    page_title="Figma / Jira / Analysis Doc → Analiz + Xray",
     page_icon="🧪",
     layout="wide",
 )
 
 
 def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
-    """
-    Lokal: .env
-    Streamlit Cloud: Secrets
-    """
     try:
         if key in st.secrets:
             return st.secrets[key]
@@ -59,7 +65,6 @@ def safe_json_loads(text: str) -> Any:
 
 def init_state() -> None:
     st.session_state.setdefault("design_context", None)
-    st.session_state.setdefault("image_url", None)
     st.session_state.setdefault("result_json", None)
     st.session_state.setdefault("editable_json_text", "")
     st.session_state.setdefault("figma_candidates", [])
@@ -67,14 +72,14 @@ def init_state() -> None:
 
 
 def show_header() -> None:
-    st.title("🧪 Figma / Screenshot → Analiz Dokümanı + Xray Test Case Generator")
+    st.title("🧪 Çok Kaynaklı Analiz ve Xray Test Case Generator")
     st.caption(
-        "Figma node/layer bilgisi veya yüklenen çoklu ekran görüntülerinden "
-        "analiz dokümanı taslağı ve Xray'e import edilebilir manuel test case CSV'si üretir."
+        "Figma, screenshot, Jira task ve analiz dokümanlarından analiz dokümanı taslağı "
+        "ve Xray'e import edilebilir manuel test case CSV'si üretir."
     )
 
 
-def show_sidebar() -> tuple[str, str, str]:
+def show_sidebar() -> Dict[str, Any]:
     st.sidebar.header("⚙️ Ayarlar")
 
     secret_figma_token = get_secret("FIGMA_TOKEN")
@@ -84,27 +89,21 @@ def show_sidebar() -> tuple[str, str, str]:
     st.sidebar.subheader("🔐 Kullanıcı Tokenları")
 
     st.sidebar.caption(
-        "Tokenlar bu ekranda saklanmaz. Sadece mevcut oturumda kullanılır."
+        "Bu alana girilen tokenlar sadece mevcut oturumda kullanılır."
     )
 
     user_figma_token = st.sidebar.text_input(
         "Figma Personal Access Token",
         type="password",
         placeholder="figd_...",
-        help=(
-            "Kendi Figma tokenını buraya girebilirsin. "
-            "Boş bırakırsan Streamlit Secrets içindeki FIGMA_TOKEN kullanılır."
-        ),
+        help="Boş bırakırsan Streamlit Secrets içindeki FIGMA_TOKEN kullanılır.",
     )
 
     user_openai_key = st.sidebar.text_input(
         "OpenAI API Key",
         type="password",
         placeholder="sk-proj-...",
-        help=(
-            "Kendi OpenAI API keyini buraya girebilirsin. "
-            "Boş bırakırsan Streamlit Secrets içindeki OPENAI_API_KEY kullanılır."
-        ),
+        help="Boş bırakırsan Streamlit Secrets içindeki OPENAI_API_KEY kullanılır.",
     )
 
     figma_token = user_figma_token.strip() if user_figma_token else secret_figma_token
@@ -118,51 +117,173 @@ def show_sidebar() -> tuple[str, str, str]:
         help="Örn: gpt-4o, gpt-4.1-mini vb.",
     )
 
-    if not model or model.strip() in ["gpt-0", "gpt-o", "gpt4o"]:
+    if not model or model.strip() in {"gpt-0", "gpt-o", "gpt4o"}:
         model = "gpt-4o"
 
     st.sidebar.divider()
+    st.sidebar.subheader("Jira Ayarları")
 
-    st.sidebar.write("**Token Durumu**")
-
-    if user_figma_token:
-        st.sidebar.write("Figma Token:", "✅ Kullanıcı tokenı girildi")
-    elif secret_figma_token:
-        st.sidebar.write("Figma Token:", "✅ Secrets içinden geliyor")
-    else:
-        st.sidebar.write("Figma Token:", "❌ Yok")
-
-    if user_openai_key:
-        st.sidebar.write("OpenAI API Key:", "✅ Kullanıcı keyi girildi")
-    elif secret_openai_key:
-        st.sidebar.write("OpenAI API Key:", "✅ Secrets içinden geliyor")
-    else:
-        st.sidebar.write("OpenAI API Key:", "❌ Yok")
-
-    st.sidebar.info(
-        "Buraya girilen tokenlar sadece oturumda kullanılır."
+    jira_base_url = st.sidebar.text_input(
+        "Jira Base URL",
+        value=get_secret("JIRA_BASE_URL", ""),
+        placeholder="https://your-domain.atlassian.net veya https://jira.company.com",
     )
 
-    return figma_token, openai_key, model
+    jira_deployment = st.sidebar.selectbox(
+        "Jira Deployment",
+        options=["dc", "cloud"],
+        index=0 if get_secret("JIRA_DEPLOYMENT", "dc") == "dc" else 1,
+    )
+
+    jira_email = st.sidebar.text_input(
+        "Jira Email (Cloud)",
+        value=get_secret("JIRA_EMAIL", ""),
+    )
+
+    jira_username = st.sidebar.text_input(
+        "Jira Username (DC/Server)",
+        value=get_secret("JIRA_USERNAME", ""),
+    )
+
+    jira_api_token = st.sidebar.text_input(
+        "Jira API Token",
+        type="password",
+        value="",
+        placeholder="Cloud API token veya basic token",
+    )
+
+    jira_pat = st.sidebar.text_input(
+        "Jira PAT",
+        type="password",
+        value="",
+        placeholder="PAT varsa buraya",
+    )
+
+    jira_password = st.sidebar.text_input(
+        "Jira Password",
+        type="password",
+        value="",
+        placeholder="Gerekliyse basic auth password",
+    )
+
+    jira_verify_ssl = st.sidebar.checkbox(
+        "Jira SSL doğrulansın",
+        value=True,
+    )
+
+    st.sidebar.divider()
+    st.sidebar.subheader("Confluence Ayarları")
+
+    use_jira_settings_for_confluence = st.sidebar.checkbox(
+        "Confluence için Jira ayarlarını kullan",
+        value=True,
+        help="Cloud ortamında çoğu zaman yeterlidir. Gerekirse kapatıp ayrı ayar gir.",
+    )
+
+    if use_jira_settings_for_confluence:
+        confluence_base_url = jira_base_url
+        confluence_deployment = jira_deployment
+        confluence_email = jira_email
+        confluence_username = jira_username
+        confluence_api_token = jira_api_token
+        confluence_pat = jira_pat
+        confluence_password = jira_password
+        confluence_verify_ssl = jira_verify_ssl
+    else:
+        confluence_base_url = st.sidebar.text_input(
+            "Confluence Base URL",
+            value=get_secret("CONFLUENCE_BASE_URL", ""),
+            placeholder="https://your-domain.atlassian.net veya https://confluence.company.com",
+        )
+
+        confluence_deployment = st.sidebar.selectbox(
+            "Confluence Deployment",
+            options=["dc", "cloud"],
+            index=0 if get_secret("CONFLUENCE_DEPLOYMENT", jira_deployment) == "dc" else 1,
+        )
+
+        confluence_email = st.sidebar.text_input(
+            "Confluence Email (Cloud)",
+            value=get_secret("CONFLUENCE_EMAIL", ""),
+        )
+
+        confluence_username = st.sidebar.text_input(
+            "Confluence Username (DC/Server)",
+            value=get_secret("CONFLUENCE_USERNAME", ""),
+        )
+
+        confluence_api_token = st.sidebar.text_input(
+            "Confluence API Token",
+            type="password",
+            value="",
+        )
+
+        confluence_pat = st.sidebar.text_input(
+            "Confluence PAT",
+            type="password",
+            value="",
+        )
+
+        confluence_password = st.sidebar.text_input(
+            "Confluence Password",
+            type="password",
+            value="",
+        )
+
+        confluence_verify_ssl = st.sidebar.checkbox(
+            "Confluence SSL doğrulansın",
+            value=True,
+        )
+
+    st.sidebar.divider()
+    st.sidebar.write("**Token Durumu**")
+
+    st.sidebar.write(
+        "Figma Token:",
+        "✅ Hazır" if figma_token else "❌ Yok",
+    )
+    st.sidebar.write(
+        "OpenAI API Key:",
+        "✅ Hazır" if openai_key else "❌ Yok",
+    )
+
+    return {
+        "figma_token": figma_token,
+        "openai_key": openai_key,
+        "model": model,
+        "jira": {
+            "base_url": jira_base_url.strip(),
+            "deployment_type": jira_deployment,
+            "email": jira_email.strip(),
+            "username": jira_username.strip(),
+            "api_token": jira_api_token.strip(),
+            "pat": jira_pat.strip(),
+            "password": jira_password.strip(),
+            "verify_ssl": jira_verify_ssl,
+        },
+        "confluence": {
+            "base_url": confluence_base_url.strip(),
+            "deployment_type": confluence_deployment,
+            "email": confluence_email.strip(),
+            "username": confluence_username.strip(),
+            "api_token": confluence_api_token.strip(),
+            "pat": confluence_pat.strip(),
+            "password": confluence_password.strip(),
+            "verify_ssl": confluence_verify_ssl,
+        },
+    }
 
 
 def uploaded_image_to_data_url(uploaded_file) -> str:
-    """
-    Görseli sıkıştırıp base64 data URL'e çevirir.
-    Tüm görseller analiz edilir; sıkıştırma sadece maliyet/payload kontrolü içindir.
-    """
-
     image = Image.open(uploaded_file)
 
     if image.mode in ("RGBA", "P"):
         background = Image.new("RGB", image.size, (255, 255, 255))
-
         if image.mode == "RGBA":
             background.paste(image, mask=image.split()[-1])
         else:
             rgba_image = image.convert("RGBA")
             background.paste(rgba_image, mask=rgba_image.split()[-1])
-
         image = background
     else:
         image = image.convert("RGB")
@@ -196,7 +317,6 @@ def build_screenshot_context(
     mode: str,
 ) -> dict:
     files = uploaded_files[:MAX_SCREENSHOTS] if uploaded_files else []
-
     screenshots = []
 
     for index, file in enumerate(files, start=1):
@@ -223,21 +343,67 @@ def build_screenshot_context(
             "screenshot_count": len(files),
             "max_screenshot_count": MAX_SCREENSHOTS,
             "batch_size": IMAGE_BATCH_SIZE,
-            "note": (
-                "Bu analiz Figma API node/layer verisi olmadan, "
-                "yüklenen tüm ekran görüntüleri batch halinde analiz edilerek üretilmiştir."
-            ),
         },
         "screenshots": screenshots,
         "instructions": [
             "Görsellerde görünen UI elementlerini analiz et.",
             "Birden fazla ekran varsa ekranları aynı ürün akışının parçaları olarak değerlendir.",
-            "Ekranlar arasında olası geçişleri, popup/empty/error/success state ilişkilerini çıkar.",
-            "Görselden net çıkarılamayan business rule'ları kesin bilgi gibi yazma.",
             "Belirsiz noktaları open_questions altında belirt.",
-            "Test case'leri Xray manuel test case formatına uygun üret.",
         ],
     }
+
+
+def build_jira_client(settings: Dict[str, Any]) -> JiraClient:
+    cfg = settings["jira"]
+    if not cfg["base_url"]:
+        raise ValueError("Jira Base URL gerekli.")
+    return JiraClient(
+        JiraAuthConfig(
+            base_url=cfg["base_url"],
+            deployment_type=cfg["deployment_type"],
+            email=cfg["email"] or None,
+            username=cfg["username"] or None,
+            api_token=cfg["api_token"] or None,
+            pat=cfg["pat"] or None,
+            password=cfg["password"] or None,
+            verify_ssl=cfg["verify_ssl"],
+        )
+    )
+
+
+def build_confluence_client_if_possible(settings: Dict[str, Any]) -> Optional[ConfluenceClient]:
+    cfg = settings["confluence"]
+
+    if not cfg["base_url"]:
+        return None
+
+    return ConfluenceClient(
+        ConfluenceAuthConfig(
+            base_url=cfg["base_url"],
+            deployment_type=cfg["deployment_type"],
+            email=cfg["email"] or None,
+            username=cfg["username"] or None,
+            api_token=cfg["api_token"] or None,
+            pat=cfg["pat"] or None,
+            password=cfg["password"] or None,
+            verify_ssl=cfg["verify_ssl"],
+        )
+    )
+
+
+def shrink_context_for_model(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: shrink_context_for_model(v) for k, v in value.items()}
+
+    if isinstance(value, list):
+        return [shrink_context_for_model(v) for v in value]
+
+    if isinstance(value, str):
+        if len(value) > MAX_CONTEXT_STR_LEN:
+            return value[:MAX_CONTEXT_STR_LEN] + "\n...[TRUNCATED]..."
+        return value
+
+    return value
 
 
 def handle_figma_scan(figma_url: str, figma_token: str) -> None:
@@ -246,7 +412,7 @@ def handle_figma_scan(figma_url: str, figma_token: str) -> None:
         st.stop()
 
     if not figma_token:
-        st.error("FIGMA_TOKEN bulunamadı. Sidebar’dan token girebilir veya Streamlit Secrets içine ekleyebilirsin.")
+        st.error("FIGMA_TOKEN bulunamadı.")
         st.stop()
 
     try:
@@ -256,187 +422,23 @@ def handle_figma_scan(figma_url: str, figma_token: str) -> None:
                 figma_url,
                 depth=3,
             )
-
             candidates = extract_candidate_frames(outline_payload)
-
             st.session_state["figma_file_key"] = outline_payload.get("file_key")
             st.session_state["figma_candidates"] = candidates
 
         if candidates:
             st.success(f"{len(candidates)} ekran/frame adayı bulundu.")
         else:
-            st.warning("Frame adayı bulunamadı. Linkin erişilebilir olduğundan emin ol.")
+            st.warning("Frame adayı bulunamadı.")
 
     except FigmaRateLimitError as exc:
         st.error(str(exc))
-
         if exc.retry_after:
-            st.warning(
-                f"Tekrar denemeden önce önerilen bekleme süresi: {exc.retry_after} saniye"
-            )
-
-        if exc.upgrade_link:
-            st.info(
-                f"Figma plan/seat limitiyle ilişkili olabilir. "
-                f"Upgrade/settings linki: {exc.upgrade_link}"
-            )
-
+            st.warning(f"Önerilen bekleme süresi: {exc.retry_after} saniye")
         st.stop()
 
     except Exception as exc:
         st.error(f"Figma ekran tarama sırasında hata oluştu: {exc}")
-        st.stop()
-
-
-def handle_generation(
-    mode: str,
-    figma_url: str,
-    figma_token: str,
-    openai_key: str,
-    model: str,
-    selected_node_id: Optional[str],
-    uploaded_screenshots: List[Any],
-    user_notes: str,
-) -> None:
-    if not openai_key:
-        st.error(
-            "OPENAI_API_KEY bulunamadı. Sidebar’dan OpenAI API key girebilir veya Streamlit Secrets içine ekleyebilirsin."
-        )
-        st.stop()
-
-    uses_figma = mode in ["Figma API Modu", "Hibrit Mod"]
-    uses_screenshot = mode in ["Screenshot Modu", "Hibrit Mod"]
-
-    if uses_figma and not figma_url:
-        st.error("Bu mod için Figma linki gerekli.")
-        st.stop()
-
-    if uses_figma and not figma_token:
-        st.error(
-            "Bu mod için FIGMA_TOKEN gerekli. Sidebar’dan token girebilir veya Streamlit Secrets içine ekleyebilirsin."
-        )
-        st.stop()
-
-    if uses_screenshot and not uploaded_screenshots:
-        st.error("Bu mod için en az 1 ekran görüntüsü yüklemelisin.")
-        st.stop()
-
-    if uploaded_screenshots and len(uploaded_screenshots) > MAX_SCREENSHOTS:
-        st.warning(
-            f"{len(uploaded_screenshots)} görsel yüklendi. "
-            f"İlk {MAX_SCREENSHOTS} görsel analizde kullanılacak."
-        )
-
-    try:
-        image_data_urls: List[str] = []
-        design_context = None
-
-        if uses_figma:
-            with st.spinner("Figma node/layer verisi okunuyor..."):
-                figma_client = FigmaClient(figma_token)
-
-                payload = figma_client.get_design_payload(
-                    figma_url,
-                    include_image=False,
-                    selected_node_id=selected_node_id,
-                )
-
-                design_context = build_design_context(payload)
-
-                if user_notes:
-                    design_context["user_notes"] = user_notes
-
-                design_context["generation_mode"] = mode
-                design_context["figma_image_api_used"] = False
-
-                st.session_state.design_context = design_context
-                st.session_state.image_url = None
-
-        if uses_screenshot:
-            with st.spinner("Ekran görüntüleri hazırlanıyor ve sıkıştırılıyor..."):
-                image_data_urls = uploaded_images_to_data_urls(uploaded_screenshots)
-
-            if not design_context:
-                design_context = build_screenshot_context(
-                    uploaded_files=uploaded_screenshots,
-                    user_notes=user_notes,
-                    mode=mode,
-                )
-            else:
-                design_context["screenshot"] = {
-                    "uploaded": True,
-                    "count": min(len(uploaded_screenshots), MAX_SCREENSHOTS),
-                    "batch_size": IMAGE_BATCH_SIZE,
-                    "filenames": [
-                        file.name for file in uploaded_screenshots[:MAX_SCREENSHOTS]
-                    ],
-                    "note": (
-                        "Bu modda Figma node/layer bilgisi ile manuel yüklenen ekran görüntüleri birlikte kullanılmıştır. "
-                        "Figma Images API kullanılmamıştır."
-                    ),
-                }
-
-        if not design_context:
-            st.error("Analiz için kullanılacak bağlam oluşturulamadı.")
-            st.stop()
-
-        st.session_state.design_context = design_context
-
-        if image_data_urls:
-            st.info(
-                f"{len(image_data_urls)} görselin tamamı analiz edilecek. "
-                f"Görseller {IMAGE_BATCH_SIZE}'şarlı batch'ler halinde işlenecek."
-            )
-
-            with st.spinner("AI tüm ekran görüntülerini batch halinde analiz ediyor..."):
-                result = generate_analysis_and_tests_for_image_batches(
-                    openai_api_key=openai_key,
-                    model=model,
-                    design_context=design_context,
-                    image_urls=image_data_urls,
-                    batch_size=IMAGE_BATCH_SIZE,
-                )
-        else:
-            with st.spinner("AI analiz dokümanı ve Xray test case listesi üretiyor..."):
-                result = generate_analysis_and_tests(
-                    openai_api_key=openai_key,
-                    model=model,
-                    design_context=design_context,
-                    image_urls=[],
-                )
-
-        st.session_state.result_json = result
-        st.session_state.editable_json_text = json.dumps(
-            result,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-        st.success("Analiz ve test case üretimi tamamlandı.")
-
-    except FigmaRateLimitError as exc:
-        st.error(str(exc))
-
-        if exc.retry_after:
-            st.warning(
-                f"Tekrar denemeden önce önerilen bekleme süresi: {exc.retry_after} saniye"
-            )
-
-        if exc.upgrade_link:
-            st.info(
-                f"Figma plan/seat limitiyle ilişkili olabilir. "
-                f"Upgrade/settings linki: {exc.upgrade_link}"
-            )
-
-        st.info(
-            "Figma limitine takıldığın için Screenshot Modu ile devam edebilirsin. "
-            "Bu modda Figma API hiç kullanılmaz."
-        )
-
-        st.stop()
-
-    except Exception as exc:
-        st.error(f"İşlem sırasında hata oluştu: {exc}")
         st.stop()
 
 
@@ -445,7 +447,7 @@ def show_candidate_selector() -> Optional[str]:
 
     if st.session_state.get("figma_candidates"):
         st.divider()
-        st.subheader("2. Bulunan Figma Ekranları")
+        st.subheader("Bulunan Figma Ekranları")
 
         candidate_labels = [
             item["label"] for item in st.session_state["figma_candidates"]
@@ -469,12 +471,272 @@ def show_candidate_selector() -> Optional[str]:
     return selected_node_id
 
 
+def handle_figma_or_screenshot_generation(
+    mode: str,
+    figma_url: str,
+    figma_token: str,
+    openai_key: str,
+    model: str,
+    selected_node_id: Optional[str],
+    uploaded_screenshots: List[Any],
+    user_notes: str,
+) -> None:
+    uses_figma = mode in ["Figma API Modu", "Hibrit Mod"]
+    uses_screenshot = mode in ["Screenshot Modu", "Hibrit Mod"]
+
+    if not openai_key:
+        st.error("OPENAI_API_KEY bulunamadı.")
+        st.stop()
+
+    if uses_figma and not figma_url:
+        st.error("Bu mod için Figma linki gerekli.")
+        st.stop()
+
+    if uses_figma and not figma_token:
+        st.error("Bu mod için FIGMA_TOKEN gerekli.")
+        st.stop()
+
+    if uses_screenshot and not uploaded_screenshots:
+        st.error("Bu mod için en az 1 ekran görüntüsü yüklemelisin.")
+        st.stop()
+
+    try:
+        image_data_urls: List[str] = []
+        design_context = None
+
+        if uses_figma:
+            with st.spinner("Figma node/layer verisi okunuyor..."):
+                figma_client = FigmaClient(figma_token)
+                payload = figma_client.get_design_payload(
+                    figma_url,
+                    include_image=False,
+                    selected_node_id=selected_node_id,
+                )
+                design_context = build_design_context(payload)
+                design_context["generation_mode"] = mode
+                design_context["user_notes"] = user_notes or ""
+                design_context["figma_image_api_used"] = False
+                st.session_state.design_context = design_context
+
+        if uses_screenshot:
+            with st.spinner("Ekran görüntüleri hazırlanıyor..."):
+                image_data_urls = uploaded_images_to_data_urls(uploaded_screenshots)
+
+            if not design_context:
+                design_context = build_screenshot_context(
+                    uploaded_files=uploaded_screenshots,
+                    user_notes=user_notes,
+                    mode=mode,
+                )
+            else:
+                design_context["screenshot"] = {
+                    "uploaded": True,
+                    "count": min(len(uploaded_screenshots), MAX_SCREENSHOTS),
+                    "batch_size": IMAGE_BATCH_SIZE,
+                    "filenames": [file.name for file in uploaded_screenshots[:MAX_SCREENSHOTS]],
+                    "note": "Figma node/layer bilgisi ile manuel yüklenen ekran görüntüleri birlikte kullanılmıştır.",
+                }
+
+        if not design_context:
+            st.error("Analiz için context oluşturulamadı.")
+            st.stop()
+
+        st.session_state.design_context = design_context
+
+        if image_data_urls:
+            st.info(
+                f"{len(image_data_urls)} görselin tamamı analiz edilecek. "
+                f"Görseller {IMAGE_BATCH_SIZE}'şarlı batch'ler halinde işlenecek."
+            )
+
+            with st.spinner("AI tüm ekran görüntülerini batch halinde analiz ediyor..."):
+                result = generate_analysis_and_tests_for_image_batches(
+                    openai_api_key=openai_key,
+                    model=model,
+                    design_context=shrink_context_for_model(design_context),
+                    image_urls=image_data_urls,
+                    batch_size=IMAGE_BATCH_SIZE,
+                )
+        else:
+            with st.spinner("AI analiz ve test case üretiyor..."):
+                result = generate_analysis_and_tests(
+                    openai_api_key=openai_key,
+                    model=model,
+                    design_context=shrink_context_for_model(design_context),
+                    image_urls=[],
+                )
+
+        st.session_state.result_json = result
+        st.session_state.editable_json_text = json.dumps(result, ensure_ascii=False, indent=2)
+        st.success("Analiz ve test case üretimi tamamlandı.")
+
+    except FigmaRateLimitError as exc:
+        st.error(str(exc))
+        st.stop()
+
+    except Exception as exc:
+        st.error(f"İşlem sırasında hata oluştu: {exc}")
+        st.stop()
+
+
+def build_figma_contexts_from_resolved_links(resolved: Dict[str, Any]) -> List[Dict[str, Any]]:
+    figma_contexts = []
+
+    for item in resolved.get("figma_contexts", []):
+        try:
+            ctx = build_design_context(
+                {
+                    "file_key": item.get("file_key"),
+                    "node_id": item.get("node_id"),
+                    "node_tree": item.get("node_tree"),
+                }
+            )
+            ctx["source"] = "figma_link_from_jira"
+            ctx["source_url"] = item.get("source_url", "")
+            figma_contexts.append(ctx)
+        except Exception:
+            continue
+
+    return figma_contexts
+
+
+def handle_jira_task_generation(
+    issue_key: str,
+    settings: Dict[str, Any],
+    user_notes: str,
+) -> None:
+    if not issue_key:
+        st.error("Lütfen Jira issue key gir.")
+        st.stop()
+
+    if not settings["openai_key"]:
+        st.error("OPENAI_API_KEY bulunamadı.")
+        st.stop()
+
+    try:
+        with st.spinner("Jira issue okunuyor..."):
+            jira_client = build_jira_client(settings)
+            issue_bundle = jira_client.get_issue_bundle(issue_key)
+            jira_context = build_jira_context(issue_bundle)
+
+        figma_client = None
+        if settings["figma_token"]:
+            try:
+                figma_client = FigmaClient(settings["figma_token"])
+            except Exception:
+                figma_client = None
+
+        confluence_client = None
+        try:
+            confluence_client = build_confluence_client_if_possible(settings)
+        except Exception:
+            confluence_client = None
+
+        with st.spinner("Jira içindeki linkler çözümleniyor..."):
+            resolved = resolve_urls(
+                urls=jira_context.get("extracted_urls", []),
+                figma_client=figma_client,
+                confluence_client=confluence_client,
+            )
+
+        figma_contexts = build_figma_contexts_from_resolved_links(resolved)
+        confluence_contexts = resolved.get("confluence_contexts", [])
+
+        merged_context = merge_source_contexts(
+            jira_context=jira_context,
+            figma_contexts=figma_contexts,
+            confluence_contexts=confluence_contexts,
+            analysis_doc_contexts=[],
+            user_notes=user_notes,
+        )
+
+        merged_context["resolved_links"] = {
+            "figma_context_count": len(figma_contexts),
+            "confluence_context_count": len(confluence_contexts),
+            "jira_url_count": len(resolved.get("jira_urls", [])),
+            "unresolved_sources": resolved.get("unresolved_sources", []),
+        }
+
+        st.session_state.design_context = merged_context
+
+        with st.spinner("AI Jira task bağlamından analiz ve test case üretiyor..."):
+            result = generate_analysis_and_tests(
+                openai_api_key=settings["openai_key"],
+                model=settings["model"],
+                design_context=shrink_context_for_model(merged_context),
+                image_urls=[],
+            )
+
+        st.session_state.result_json = result
+        st.session_state.editable_json_text = json.dumps(result, ensure_ascii=False, indent=2)
+        st.success("Jira task modunda üretim tamamlandı.")
+
+    except Exception as exc:
+        st.error(f"Jira Task Modu sırasında hata oluştu: {exc}")
+        st.stop()
+
+
+def handle_analysis_doc_generation(
+    uploaded_docs: List[Any],
+    pasted_text: str,
+    settings: Dict[str, Any],
+    user_notes: str,
+) -> None:
+    if not settings["openai_key"]:
+        st.error("OPENAI_API_KEY bulunamadı.")
+        st.stop()
+
+    if not uploaded_docs and not pasted_text.strip():
+        st.error("En az bir analiz dokümanı yüklemeli veya metin yapıştırmalısın.")
+        st.stop()
+
+    analysis_doc_contexts = []
+
+    try:
+        limited_docs = uploaded_docs[:MAX_ANALYSIS_DOCS] if uploaded_docs else []
+
+        for uploaded in limited_docs:
+            text = extract_text_from_upload(uploaded.name, uploaded.getvalue())
+            ctx = build_analysis_doc_context(text, filename=uploaded.name)
+            analysis_doc_contexts.append(ctx)
+
+        if pasted_text.strip():
+            ctx = build_analysis_doc_context(pasted_text, filename="Pasted Analysis Text")
+            analysis_doc_contexts.append(ctx)
+
+        merged_context = merge_source_contexts(
+            jira_context=None,
+            figma_contexts=[],
+            confluence_contexts=[],
+            analysis_doc_contexts=analysis_doc_contexts,
+            user_notes=user_notes,
+        )
+
+        st.session_state.design_context = merged_context
+
+        with st.spinner("AI analiz dokümanından test case üretiyor..."):
+            result = generate_analysis_and_tests(
+                openai_api_key=settings["openai_key"],
+                model=settings["model"],
+                design_context=shrink_context_for_model(merged_context),
+                image_urls=[],
+            )
+
+        st.session_state.result_json = result
+        st.session_state.editable_json_text = json.dumps(result, ensure_ascii=False, indent=2)
+        st.success("Analiz Dokümanı Modu tamamlandı.")
+
+    except Exception as exc:
+        st.error(f"Analiz Dokümanı Modu sırasında hata oluştu: {exc}")
+        st.stop()
+
+
 def show_analysis_context() -> None:
     if not st.session_state.design_context:
         return
 
     st.divider()
-    st.subheader("3. Analiz İçin Kullanılan Bağlam")
+    st.subheader("Analiz İçin Kullanılan Bağlam")
 
     context = st.session_state.design_context
     summary = context.get("summary", {})
@@ -488,9 +750,14 @@ def show_analysis_context() -> None:
         metric_cols[4].metric("Link", summary.get("link_count", 0))
         metric_cols[5].metric("Component", summary.get("component_count", 0))
     else:
-        st.info("Bu analiz screenshot üzerinden üretildiği için Figma node metrikleri bulunmuyor.")
-        if summary.get("screenshot_count") is not None:
-            st.metric("Kullanılan Screenshot", summary.get("screenshot_count", 0))
+        small_summary = {
+            k: v for k, v in summary.items()
+            if isinstance(v, (str, int, float, bool))
+        }
+        if small_summary:
+            cols = st.columns(min(len(small_summary), 4))
+            for idx, (k, v) in enumerate(list(small_summary.items())[:4]):
+                cols[idx].metric(k, v)
 
     with st.expander("Kullanılan Context JSON"):
         st.json(context)
@@ -501,12 +768,7 @@ def show_results_and_downloads() -> None:
         return
 
     st.divider()
-    st.subheader("4. AI Çıktısı / Düzenleme Alanı")
-
-    st.caption(
-        "Buradaki JSON'u manuel düzeltebilirsin. "
-        "CSV, PDF ve Markdown çıktıları bu düzenlenmiş JSON üzerinden oluşturulur."
-    )
+    st.subheader("AI Çıktısı / Düzenleme Alanı")
 
     st.session_state.editable_json_text = st.text_area(
         "JSON Çıktısı",
@@ -521,7 +783,7 @@ def show_results_and_downloads() -> None:
         st.stop()
 
     st.divider()
-    st.subheader("5. Test Case Önizleme")
+    st.subheader("Test Case Önizleme")
 
     df = test_cases_to_dataframe(edited_result)
 
@@ -531,7 +793,7 @@ def show_results_and_downloads() -> None:
         st.dataframe(df, use_container_width=True)
 
     st.divider()
-    st.subheader("6. İndirilebilir Çıktılar")
+    st.subheader("İndirilebilir Çıktılar")
 
     try:
         markdown_text = to_markdown(edited_result)
@@ -542,9 +804,9 @@ def show_results_and_downloads() -> None:
         st.error(f"Çıktı dosyaları oluşturulurken hata oluştu: {exc}")
         st.stop()
 
-    download_cols = st.columns(4)
+    cols = st.columns(4)
 
-    with download_cols[0]:
+    with cols[0]:
         st.download_button(
             label="📄 Analiz Markdown İndir",
             data=markdown_text.encode("utf-8-sig"),
@@ -553,7 +815,7 @@ def show_results_and_downloads() -> None:
             use_container_width=True,
         )
 
-    with download_cols[1]:
+    with cols[1]:
         st.download_button(
             label="📕 Analiz PDF İndir",
             data=pdf_bytes,
@@ -562,7 +824,7 @@ def show_results_and_downloads() -> None:
             use_container_width=True,
         )
 
-    with download_cols[2]:
+    with cols[2]:
         st.download_button(
             label="🧪 Xray CSV İndir",
             data=csv_bytes,
@@ -571,7 +833,7 @@ def show_results_and_downloads() -> None:
             use_container_width=True,
         )
 
-    with download_cols[3]:
+    with cols[3]:
         st.download_button(
             label="🧾 JSON İndir",
             data=json_bytes,
@@ -588,9 +850,9 @@ def main() -> None:
     init_state()
     show_header()
 
-    figma_token, openai_key, model = show_sidebar()
+    settings = show_sidebar()
 
-    st.subheader("1. Çalışma Modu")
+    st.subheader("Çalışma Modu")
 
     mode = st.radio(
         "Nasıl analiz üretmek istiyorsun?",
@@ -598,19 +860,20 @@ def main() -> None:
             "Figma API Modu",
             "Screenshot Modu",
             "Hibrit Mod",
+            "Jira Task Modu",
+            "Analiz Dokümanı Modu",
         ],
-        horizontal=True,
-        help=(
-            "Figma API Modu node/layer bilgisi kullanır. "
-            "Screenshot Modu Figma API kullanmaz. "
-            "Hibrit Mod ikisini birlikte kullanır ama Figma Images API'ye gitmez."
-        ),
+        horizontal=False,
     )
 
     st.divider()
 
+    selected_node_id = None
     figma_url = ""
     uploaded_screenshots: List[Any] = []
+    issue_key = ""
+    uploaded_docs: List[Any] = []
+    pasted_analysis_text = ""
 
     if mode in ["Figma API Modu", "Hibrit Mod"]:
         st.subheader("Figma Linki")
@@ -623,20 +886,18 @@ def main() -> None:
         col_scan, col_info = st.columns([1, 4])
 
         with col_scan:
-            scan_button = st.button(
-                "Figma ekranlarını tara",
-                use_container_width=True,
-            )
+            scan_button = st.button("Figma ekranlarını tara", use_container_width=True)
 
         with col_info:
             st.caption(
                 "Sadece dosya linki verirsen önce ekranları tara. "
-                "Node-id içeren spesifik frame linki verirsen doğrudan üretim de yapabilirsin. "
-                "Bu versiyon Figma Images API kullanmaz."
+                "Node-id içeren frame linki verirsen doğrudan üretim de yapabilirsin."
             )
 
         if scan_button:
-            handle_figma_scan(figma_url, figma_token)
+            handle_figma_scan(figma_url, settings["figma_token"])
+
+        selected_node_id = show_candidate_selector()
 
     if mode in ["Screenshot Modu", "Hibrit Mod"]:
         st.subheader("Ekran Görüntüleri")
@@ -646,26 +907,12 @@ def main() -> None:
             type=["png", "jpg", "jpeg", "webp"],
             accept_multiple_files=True,
             help=(
-                "Birden fazla ekran yükleyebilirsin: ana ekran, popup, empty state, error state, success state vb. "
                 f"En fazla {MAX_SCREENSHOTS} görsel analiz edilecek. "
                 f"Görseller {IMAGE_BATCH_SIZE}'şarlı batch'lerle işlenecek."
             ),
         )
 
         if uploaded_screenshots:
-            if len(uploaded_screenshots) > MAX_SCREENSHOTS:
-                st.warning(
-                    f"{len(uploaded_screenshots)} görsel yüklendi. "
-                    f"İlk {MAX_SCREENSHOTS} görsel analizde kullanılacak."
-                )
-            else:
-                st.success(
-                    f"{len(uploaded_screenshots)} görsel yüklendi. "
-                    "Tüm görseller analizde kullanılacak."
-                )
-
-            st.caption("Yüklenen ekran görüntülerinden önizleme:")
-
             preview_cols = st.columns(4)
             preview_limit = min(len(uploaded_screenshots), 12)
 
@@ -677,24 +924,44 @@ def main() -> None:
                         use_container_width=True,
                     )
 
-            if len(uploaded_screenshots) > preview_limit:
-                st.info(
-                    f"Önizlemede ilk {preview_limit} görsel gösteriliyor; "
-                    f"analizde {min(len(uploaded_screenshots), MAX_SCREENSHOTS)} görsel kullanılacak."
-                )
+    if mode == "Jira Task Modu":
+        st.subheader("Jira Task")
+
+        issue_key = st.text_input(
+            "Jira Issue Key",
+            placeholder="Örn: APP-1234",
+        )
+
+        st.caption(
+            "Task içindeki description, comments, custom field'lar, remote link'ler ve "
+            "varsa Figma / Confluence linkleri birlikte değerlendirilecektir."
+        )
+
+    if mode == "Analiz Dokümanı Modu":
+        st.subheader("Analiz Dokümanı")
+
+        uploaded_docs = st.file_uploader(
+            "Analiz dokümanlarını yükle",
+            type=["txt", "md", "docx", "pdf", "html", "htm"],
+            accept_multiple_files=True,
+            help=f"En fazla {MAX_ANALYSIS_DOCS} doküman işlenecek.",
+        )
+
+        pasted_analysis_text = st.text_area(
+            "Veya analiz metnini buraya yapıştır",
+            height=220,
+            placeholder="Analiz dokümanı metnini buraya yapıştırabilirsin...",
+        )
 
     user_notes = st.text_area(
         "Ek bilgi / notlar",
         placeholder=(
-            "Örn: Bu ekranlar fizy son dinlenenler akışına aittir. "
-            "Liste itemlarına tıklanınca ilgili detay ekranına gidilir. "
-            "Chevron olan itemlar liste/albüm içeriğini açar. "
-            "Test case'ler Xray Manual Test formatına uygun olmalı."
+            "Örn: Test case'ler Xray Manual Test formatına uygun olmalı. "
+            "Negatif senaryolar da üretilsin. "
+            "Comments kesin requirement sayılmasın."
         ),
         height=120,
     )
-
-    selected_node_id = show_candidate_selector()
 
     st.divider()
 
@@ -705,16 +972,32 @@ def main() -> None:
     )
 
     if generate_button:
-        handle_generation(
-            mode=mode,
-            figma_url=figma_url,
-            figma_token=figma_token,
-            openai_key=openai_key,
-            model=model,
-            selected_node_id=selected_node_id,
-            uploaded_screenshots=uploaded_screenshots,
-            user_notes=user_notes,
-        )
+        if mode in ["Figma API Modu", "Screenshot Modu", "Hibrit Mod"]:
+            handle_figma_or_screenshot_generation(
+                mode=mode,
+                figma_url=figma_url,
+                figma_token=settings["figma_token"],
+                openai_key=settings["openai_key"],
+                model=settings["model"],
+                selected_node_id=selected_node_id,
+                uploaded_screenshots=uploaded_screenshots,
+                user_notes=user_notes,
+            )
+
+        elif mode == "Jira Task Modu":
+            handle_jira_task_generation(
+                issue_key=issue_key.strip(),
+                settings=settings,
+                user_notes=user_notes,
+            )
+
+        elif mode == "Analiz Dokümanı Modu":
+            handle_analysis_doc_generation(
+                uploaded_docs=uploaded_docs,
+                pasted_text=pasted_analysis_text,
+                settings=settings,
+                user_notes=user_notes,
+            )
 
     show_analysis_context()
     show_results_and_downloads()
