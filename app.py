@@ -1,9 +1,7 @@
 import base64
 import io
 import json
-import math
 import os
-from copy import deepcopy
 from typing import Any, Optional, List, Dict
 
 import streamlit as st
@@ -52,7 +50,6 @@ def get_secret(key: str, default: Optional[str] = None) -> Optional[str]:
             return st.secrets[key]
     except Exception:
         pass
-
     return os.getenv(key, default)
 
 
@@ -87,10 +84,7 @@ def show_sidebar() -> Dict[str, Any]:
     default_model = get_secret("OPENAI_MODEL", "gpt-4o")
 
     st.sidebar.subheader("🔐 Kullanıcı Tokenları")
-
-    st.sidebar.caption(
-        "Bu alana girilen tokenlar sadece mevcut oturumda kullanılır."
-    )
+    st.sidebar.caption("Bu alana girilen tokenlar sadece mevcut oturumda kullanılır.")
 
     user_figma_token = st.sidebar.text_input(
         "Figma Personal Access Token",
@@ -237,15 +231,8 @@ def show_sidebar() -> Dict[str, Any]:
 
     st.sidebar.divider()
     st.sidebar.write("**Token Durumu**")
-
-    st.sidebar.write(
-        "Figma Token:",
-        "✅ Hazır" if figma_token else "❌ Yok",
-    )
-    st.sidebar.write(
-        "OpenAI API Key:",
-        "✅ Hazır" if openai_key else "❌ Yok",
-    )
+    st.sidebar.write("Figma Token:", "✅ Hazır" if figma_token else "❌ Yok")
+    st.sidebar.write("OpenAI API Key:", "✅ Hazır" if openai_key else "❌ Yok")
 
     return {
         "figma_token": figma_token,
@@ -306,7 +293,6 @@ def uploaded_image_to_data_url(uploaded_file) -> str:
 def uploaded_images_to_data_urls(uploaded_files: List[Any]) -> List[str]:
     if not uploaded_files:
         return []
-
     limited_files = uploaded_files[:MAX_SCREENSHOTS]
     return [uploaded_image_to_data_url(file) for file in limited_files]
 
@@ -325,10 +311,7 @@ def build_screenshot_context(
                 "index": index,
                 "filename": file.name,
                 "content_type": file.type,
-                "note": (
-                    "Bu ekran görüntüsü kullanıcı tarafından manuel yüklendi. "
-                    "Figma API kullanılmadan analiz edilebilir."
-                ),
+                "note": "Bu ekran görüntüsü kullanıcı tarafından manuel yüklendi.",
             }
         )
 
@@ -357,6 +340,7 @@ def build_jira_client(settings: Dict[str, Any]) -> JiraClient:
     cfg = settings["jira"]
     if not cfg["base_url"]:
         raise ValueError("Jira Base URL gerekli.")
+
     return JiraClient(
         JiraAuthConfig(
             base_url=cfg["base_url"],
@@ -373,7 +357,6 @@ def build_jira_client(settings: Dict[str, Any]) -> JiraClient:
 
 def build_confluence_client_if_possible(settings: Dict[str, Any]) -> Optional[ConfluenceClient]:
     cfg = settings["confluence"]
-
     if not cfg["base_url"]:
         return None
 
@@ -394,15 +377,12 @@ def build_confluence_client_if_possible(settings: Dict[str, Any]) -> Optional[Co
 def shrink_context_for_model(value: Any) -> Any:
     if isinstance(value, dict):
         return {k: shrink_context_for_model(v) for k, v in value.items()}
-
     if isinstance(value, list):
         return [shrink_context_for_model(v) for v in value]
-
     if isinstance(value, str):
         if len(value) > MAX_CONTEXT_STR_LEN:
             return value[:MAX_CONTEXT_STR_LEN] + "\n...[TRUNCATED]..."
         return value
-
     return value
 
 
@@ -418,10 +398,7 @@ def handle_figma_scan(figma_url: str, figma_token: str) -> None:
     try:
         with st.spinner("Figma dosyasındaki ekranlar taranıyor..."):
             figma_client = FigmaClient(figma_token)
-            outline_payload = figma_client.get_design_outline_payload(
-                figma_url,
-                depth=3,
-            )
+            outline_payload = figma_client.get_design_outline_payload(figma_url, depth=3)
             candidates = extract_candidate_frames(outline_payload)
             st.session_state["figma_file_key"] = outline_payload.get("file_key")
             st.session_state["figma_candidates"] = candidates
@@ -449,9 +426,7 @@ def show_candidate_selector() -> Optional[str]:
         st.divider()
         st.subheader("Bulunan Figma Ekranları")
 
-        candidate_labels = [
-            item["label"] for item in st.session_state["figma_candidates"]
-        ]
+        candidate_labels = [item["label"] for item in st.session_state["figma_candidates"]]
 
         selected_label = st.selectbox(
             "Analiz edilecek ekran/frame seç",
