@@ -1,10 +1,22 @@
 import base64
-import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
+
+from services.analysis_doc_parser import extract_text_from_upload
+
+
+ALLOWED_ATTACHMENT_SUFFIXES = {
+    ".txt",
+    ".md",
+    ".docx",
+    ".pdf",
+    ".html",
+    ".htm",
+    ".csv",
+}
 
 
 @dataclass
@@ -69,6 +81,20 @@ class JiraClient:
             return {}
         return response.json()
 
+    def _request_bytes(self, url_or_path: str) -> bytes:
+        if url_or_path.startswith("http://") or url_or_path.startswith("https://"):
+            url = url_or_path
+        else:
+            url = urljoin(self.base_url + "/", url_or_path.lstrip("/"))
+
+        response = self.session.get(
+            url,
+            timeout=self.config.timeout,
+            verify=self.config.verify_ssl,
+        )
+        response.raise_for_status()
+        return response.content
+
     def get_issue(self, issue_key: str) -> Dict[str, Any]:
         fields = [
             "summary",
@@ -108,7 +134,14 @@ class JiraClient:
             return data
         return data.get("values", [])
 
-    def get_issue_bundle(self, issue_key: str) -> Dict[str, Any]:
+    def get_issue_bundle(
+        self,
+        issue_key: str,
+        include_attachment_contents: bool = True,
+        max_attachments: int = 5,
+        max_attachment_size_bytes: int = 5 * 1024 * 1024,
+        max_attachment_text_chars: int = 15000,
+    ) -> Dict[str, Any]:
         issue = self.get_issue(issue_key)
 
         comments = []
@@ -125,11 +158,105 @@ class JiraClient:
         except requests.HTTPError:
             remote_links = []
 
+        attachment_contents = []
+        if include_attachment_contents:
+            attachment_contents = self.extract_supported_attachment_contents(
+                issue=issue,
+                max_attachments=max_attachments,
+                max_attachment_size_bytes=max_attachment_size_bytes,
+                max_attachment_text_chars=max_attachment_text_chars,
+            )
+
         return {
             "issue": issue,
             "comments": comments,
             "remote_links": remote_links,
+            "attachment_contents": attachment_contents,
         }
+
+    def extract_supported_attachment_contents(
+        self,
+        issue: Dict[str, Any],
+        max_attachments: int = 5,
+        max_attachment_size_bytes: int = 5 * 1024 * 1024,
+        max_attachment_text_chars: int = 15000,
+    ) -> List[Dict[str, Any]]:
+        fields = issue.get("fields", {})
+        attachments = fields.get("attachment", []) or []
+
+        extracted: List[Dict[str, Any]] = []
+
+        for att in attachments[:max_attachments]:
+            filename = att.get("filename", "") or ""
+            mime_type = att.get("mimeType", "") or ""
+            size_bytes = int(att.get("size", 0) or 0)
+            content_url = att.get("content", "") or ""
+
+            suffix = self._suffix(filename)
+
+            if suffix not in ALLOWED_ATTACHMENT_SUFFIXES:
+                extracted.append(
+                    {
+                        "filename": filename,
+                        "mime_type": mime_type,
+                        "size_bytes": size_bytes,
+                        "supported": False,
+                        "reason": "unsupported_extension",
+                        "text": "",
+                    }
+                )
+                continue
+
+            if size_bytes > max_attachment_size_bytes:
+                extracted.append(
+                    {
+                        "filename": filename,
+                        "mime_type": mime_type,
+                        "size_bytes": size_bytes,
+                        "supported": False,
+                        "reason": "file_too_large",
+                        "text": "",
+                    }
+                )
+                continue
+
+            try:
+                content_bytes = self._request_bytes(content_url)
+                extracted_text = extract_text_from_upload(filename, content_bytes)
+
+                if len(extracted_text) > max_attachment_text_chars:
+                    extracted_text = extracted_text[:max_attachment_text_chars] + "\n...[TRUNCATED]..."
+
+                extracted.append(
+                    {
+                        "filename": filename,
+                        "mime_type": mime_type,
+                        "size_bytes": size_bytes,
+                        "supported": True,
+                        "reason": "",
+                        "text": extracted_text.strip(),
+                    }
+                )
+            except Exception as exc:
+                extracted.append(
+                    {
+                        "filename": filename,
+                        "mime_type": mime_type,
+                        "size_bytes": size_bytes,
+                        "supported": False,
+                        "reason": f"read_failed: {exc}",
+                        "text": "",
+                    }
+                )
+
+        return extracted
+
+    @staticmethod
+    def _suffix(filename: str) -> str:
+        filename = filename.lower().strip()
+        if "." not in filename:
+            return ""
+        return "." + filename.split(".")[-1]
 
 
 def extract_text_from_jira_value(value: Any) -> str:
