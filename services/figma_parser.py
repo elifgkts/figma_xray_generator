@@ -1,332 +1,235 @@
 from typing import Any, Dict, List, Optional
 
 
-BUTTON_KEYWORDS = [
-    "button",
-    "btn",
-    "cta",
-    "buton",
-    "devam",
-    "giriş",
-    "giris",
-    "kaydet",
-    "onayla",
-    "iptal",
-    "ara",
-    "başla",
-    "basla",
-    "satın al",
-    "satin al",
-    "tamam",
-    "submit",
-    "continue",
-    "save",
-    "cancel"
-]
-
-INPUT_KEYWORDS = [
-    "input",
-    "field",
-    "textfield",
-    "text field",
-    "form",
-    "telefon",
-    "phone",
-    "email",
-    "e-posta",
-    "eposta",
-    "şifre",
-    "sifre",
-    "password",
-    "arama",
-    "search",
-    "tarih",
-    "date",
-    "adres",
-    "address"
-]
-
-LINK_KEYWORDS = [
-    "link",
-    "forgot",
-    "şifremi unuttum",
-    "sifremi unuttum",
-    "detay",
-    "tümünü gör",
-    "tumunu gor",
-    "yardım",
-    "yardim",
-    "terms",
-    "privacy",
-    "kvkk"
-]
+FRAME_TYPES = {"FRAME", "SECTION"}
+COMPONENT_TYPES = {"COMPONENT", "INSTANCE", "COMPONENT_SET"}
+TEXT_TYPES = {"TEXT"}
 
 
-def _safe_str(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip()
+def extract_candidate_frames(outline_payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    node_tree = outline_payload.get("node_tree", {}) or {}
+    results: List[Dict[str, Any]] = []
+
+    def walk(node: Dict[str, Any], parents: List[str]) -> None:
+        if not isinstance(node, dict):
+            return
+
+        node_type = node.get("type", "")
+        node_name = (node.get("name") or "").strip()
+        node_id = node.get("id", "")
+
+        current_path = parents + ([node_name] if node_name else [])
+
+        if node_type in FRAME_TYPES.union(COMPONENT_TYPES):
+            path_text = " / ".join([p for p in current_path if p])
+            label = f"{path_text} [{node_type}] - {node_id}" if path_text else f"[{node_type}] - {node_id}"
+            results.append(
+                {
+                    "id": node_id,
+                    "name": node_name,
+                    "type": node_type,
+                    "path": path_text,
+                    "label": label,
+                }
+            )
+
+        for child in node.get("children", []) or []:
+            walk(child, current_path)
+
+    walk(node_tree, [])
+
+    # Daha temiz kullanım için duplicate label/id kırp
+    seen = set()
+    unique_results = []
+
+    for item in results:
+        key = (item["id"], item["label"])
+        if key not in seen:
+            seen.add(key)
+            unique_results.append(item)
+
+    return unique_results[:500]
 
 
-def _node_name(node: dict) -> str:
-    return _safe_str(node.get("name"))
+def build_design_context(payload: Dict[str, Any]) -> Dict[str, Any]:
+    node_tree = payload.get("node_tree", {}) or {}
+    file_key = payload.get("file_key", "")
+    file_name = payload.get("file_name", "") or ""
+    node_id = payload.get("node_id", "")
+    screen_name = (node_tree.get("name") or file_name or "Figma Screen").strip()
 
+    texts: List[Dict[str, Any]] = []
+    buttons: List[Dict[str, Any]] = []
+    inputs: List[Dict[str, Any]] = []
+    links: List[Dict[str, Any]] = []
+    frames: List[Dict[str, Any]] = []
+    components: List[Dict[str, Any]] = []
 
-def _node_type(node: dict) -> str:
-    return _safe_str(node.get("type"))
+    total_nodes = 0
 
+    def walk(node: Dict[str, Any], parents: List[str]) -> None:
+        nonlocal total_nodes
 
-def _visible_text(node: dict) -> Optional[str]:
-    if node.get("type") == "TEXT":
-        characters = _safe_str(node.get("characters"))
-        if characters:
-            return characters
-    return None
+        if not isinstance(node, dict):
+            return
 
+        total_nodes += 1
 
-def _looks_like_button(name: str, text: str) -> bool:
-    combined = f"{name} {text}".lower()
-    return any(keyword in combined for keyword in BUTTON_KEYWORDS)
+        node_type = node.get("type", "")
+        node_name = (node.get("name") or "").strip()
+        path = build_path(parents, node_name)
+        text_value = extract_node_text(node)
 
-
-def _looks_like_input(name: str, text: str) -> bool:
-    combined = f"{name} {text}".lower()
-    return any(keyword in combined for keyword in INPUT_KEYWORDS)
-
-
-def _looks_like_link(name: str, text: str) -> bool:
-    combined = f"{name} {text}".lower()
-    return any(keyword in combined for keyword in LINK_KEYWORDS)
-
-
-def _compact_node(node: dict, depth: int = 0, max_depth: int = 5) -> Optional[dict]:
-    if depth > max_depth:
-        return None
-
-    node_type = _node_type(node)
-    name = _node_name(node)
-    text = _visible_text(node)
-
-    children = []
-    for child in node.get("children", []) or []:
-        compact_child = _compact_node(child, depth + 1, max_depth)
-        if compact_child:
-            children.append(compact_child)
-
-    has_useful_data = bool(name or text or children)
-    if not has_useful_data:
-        return None
-
-    result = {
-        "id": node.get("id", ""),
-        "name": name,
-        "type": node_type,
-        "text": text or "",
-        "children": children
-    }
-
-    box = node.get("absoluteBoundingBox")
-    if box:
-        result["position"] = {
-            "x": box.get("x"),
-            "y": box.get("y"),
-            "width": box.get("width"),
-            "height": box.get("height")
+        entry = {
+            "id": node.get("id", ""),
+            "name": node_name,
+            "type": node_type,
+            "text": text_value,
+            "path": path,
         }
 
-    return result
+        if node_type in TEXT_TYPES and text_value:
+            texts.append(entry)
 
+        if node_type in FRAME_TYPES:
+            frames.append(entry)
 
-def _walk(node: dict, depth: int = 0) -> List[dict]:
-    rows = []
+        if node_type in COMPONENT_TYPES:
+            components.append(entry)
 
-    current = {
-        "id": node.get("id", ""),
-        "depth": depth,
-        "name": _node_name(node),
-        "type": _node_type(node),
-        "text": _visible_text(node) or ""
-    }
-    rows.append(current)
+        if is_button_node(node, text_value):
+            buttons.append(entry)
 
-    for child in node.get("children", []) or []:
-        rows.extend(_walk(child, depth + 1))
+        if is_input_node(node, text_value):
+            inputs.append(entry)
 
-    return rows
+        if is_link_node(node, text_value):
+            links.append(entry)
 
+        for child in node.get("children", []) or []:
+            walk(child, parents + ([node_name] if node_name else []))
 
-def build_design_context(payload: dict) -> Dict[str, Any]:
-    node_tree = payload.get("node_tree") or payload.get("raw", {}).get("document")
-
-    if not node_tree:
-        raise ValueError("Figma node/document verisi bulunamadı.")
-
-    rows = _walk(node_tree)
-
-    texts = []
-    buttons = []
-    inputs = []
-    links = []
-    frames = []
-    components = []
-
-    for row in rows:
-        name = row.get("name", "")
-        node_type = row.get("type", "")
-        text = row.get("text", "")
-
-        if text:
-            texts.append(text)
-
-        if node_type in ["FRAME", "SECTION", "COMPONENT", "INSTANCE", "COMPONENT_SET"]:
-            frames.append(name)
-
-        if node_type in ["COMPONENT", "INSTANCE", "COMPONENT_SET"]:
-            components.append(name)
-
-        if _looks_like_button(name, text):
-            label = text or name
-            if label:
-                buttons.append(label)
-
-        if _looks_like_input(name, text):
-            label = text or name
-            if label:
-                inputs.append(label)
-
-        if _looks_like_link(name, text):
-            label = text or name
-            if label:
-                links.append(label)
-
-    compact_tree = _compact_node(node_tree)
-
-    unique_texts = _dedupe(texts)
-    unique_buttons = _dedupe(buttons)
-    unique_inputs = _dedupe(inputs)
-    unique_links = _dedupe(links)
-    unique_frames = _dedupe([f for f in frames if f])
-    unique_components = _dedupe([c for c in components if c])
+    walk(node_tree, [])
 
     context = {
-        "file_key": payload.get("file_key"),
-        "node_id": payload.get("node_id"),
-        "screen_name": node_tree.get("name", "Seçili Figma Ekranı"),
+        "source": "figma_design",
+        "file_key": file_key,
+        "file_name": file_name,
+        "node_id": node_id,
+        "screen_name": screen_name,
         "summary": {
-            "total_nodes": len(rows),
-            "text_count": len(unique_texts),
-            "button_count": len(unique_buttons),
-            "input_count": len(unique_inputs),
-            "link_count": len(unique_links),
-            "frame_count": len(unique_frames),
-            "component_count": len(unique_components)
+            "total_nodes": total_nodes,
+            "text_count": len(texts),
+            "button_count": len(buttons),
+            "input_count": len(inputs),
+            "link_count": len(links),
+            "component_count": len(components),
         },
-        "texts": unique_texts[:120],
-        "buttons": unique_buttons[:80],
-        "inputs": unique_inputs[:80],
-        "links": unique_links[:80],
-        "frames": unique_frames[:80],
-        "components": unique_components[:80],
-        "compact_tree": compact_tree
+        "texts": dedupe_entries(texts, max_items=120),
+        "buttons": dedupe_entries(buttons, max_items=60),
+        "inputs": dedupe_entries(inputs, max_items=60),
+        "links": dedupe_entries(links, max_items=60),
+        "frames": dedupe_entries(frames, max_items=80),
+        "components": dedupe_entries(components, max_items=100),
+        "instructions": [
+            "Text ve component listelerini ekranın görünen alanlarına göre yorumla.",
+            "Figma'da açıkça görünmeyen business rule'ları kesin bilgi gibi yazma.",
+            "Buton ve input tespiti heuristiktir; belirsizse needs_confirmation kullan.",
+        ],
     }
 
     return context
 
 
-def extract_candidate_frames(payload: dict) -> List[Dict[str, Any]]:
-    """
-    Figma dosyasındaki analiz edilebilir ekran/frame adaylarını çıkarır.
-    Dosya linki verildiğinde kullanıcıya dropdown sunmak için kullanılır.
-    """
-    node_tree = payload.get("node_tree") or payload.get("raw", {}).get("document")
+def extract_node_text(node: Dict[str, Any]) -> str:
+    if node.get("characters"):
+        return str(node.get("characters")).strip()
 
-    if not node_tree:
-        return []
-
-    candidates = []
-
-    def walk(node: dict, page_name: str = "", depth: int = 0) -> None:
-        node_type = _node_type(node)
-        node_name = _node_name(node)
-        node_id = node.get("id", "")
-
-        current_page = page_name
-
-        if node_type == "CANVAS":
-            current_page = node_name
-
-        if node_type in ["FRAME", "SECTION", "COMPONENT", "INSTANCE"]:
-            children = node.get("children", []) or []
-            text_count = _count_text_nodes(node)
-
-            box = node.get("absoluteBoundingBox") or {}
-            width = box.get("width") or 0
-            height = box.get("height") or 0
-
-            score = 0
-            score += 40 if node_type == "FRAME" else 15
-            score += 20 if width >= 300 and height >= 300 else 0
-            score += min(len(children), 50)
-            score += min(text_count * 2, 30)
-            score -= depth
-
-            label_page = current_page or "Page"
-            label_name = node_name or "(isimsiz frame)"
-
-            candidates.append(
-                {
-                    "id": node_id,
-                    "name": label_name,
-                    "type": node_type,
-                    "page": label_page,
-                    "depth": depth,
-                    "children_count": len(children),
-                    "text_count": text_count,
-                    "width": round(width, 2),
-                    "height": round(height, 2),
-                    "score": score,
-                    "label": f"{label_page} / {label_name} [{node_type}] - {node_id}"
-                }
-            )
-
-        for child in node.get("children", []) or []:
-            walk(child, current_page, depth + 1)
-
-    walk(node_tree)
-
-    candidates.sort(
-        key=lambda item: (
-            item.get("score", 0),
-            item.get("children_count", 0),
-            item.get("text_count", 0)
-        ),
-        reverse=True
-    )
-
-    return candidates
+    name = str(node.get("name") or "").strip()
+    return name
 
 
-def _count_text_nodes(node: dict) -> int:
-    count = 1 if node.get("type") == "TEXT" and node.get("characters") else 0
-
-    for child in node.get("children", []) or []:
-        count += _count_text_nodes(child)
-
-    return count
+def build_path(parents: List[str], node_name: str) -> str:
+    parts = [p for p in parents if p]
+    if node_name:
+        parts.append(node_name)
+    return " / ".join(parts)
 
 
-def _dedupe(items: List[str]) -> List[str]:
+def is_button_node(node: Dict[str, Any], text_value: str) -> bool:
+    haystack = f"{node.get('name', '')} {text_value}".lower()
+    button_keywords = [
+        "button",
+        "btn",
+        "cta",
+        "devam",
+        "kaydet",
+        "tamam",
+        "onayla",
+        "giriş",
+        "login",
+        "submit",
+        "play",
+        "oynat",
+        "ileri",
+        "geri",
+        "close",
+        "kapat",
+        "more",
+        "chevron",
+    ]
+    return any(keyword in haystack for keyword in button_keywords)
+
+
+def is_input_node(node: Dict[str, Any], text_value: str) -> bool:
+    haystack = f"{node.get('name', '')} {text_value}".lower()
+    input_keywords = [
+        "input",
+        "textfield",
+        "text field",
+        "search",
+        "textbox",
+        "alan",
+        "email",
+        "şifre",
+        "password",
+        "otp",
+        "phone",
+        "telefon",
+        "placeholder",
+    ]
+    return any(keyword in haystack for keyword in input_keywords)
+
+
+def is_link_node(node: Dict[str, Any], text_value: str) -> bool:
+    haystack = f"{node.get('name', '')} {text_value}".lower()
+    link_keywords = [
+        "link",
+        "url",
+        "web",
+        "detail",
+        "detay",
+        "learn more",
+        "daha fazla",
+        "see all",
+        "tümü",
+    ]
+    return any(keyword in haystack for keyword in link_keywords)
+
+
+def dedupe_entries(items: List[Dict[str, Any]], max_items: int = 100) -> List[Dict[str, Any]]:
     seen = set()
     result = []
 
     for item in items:
-        clean = _safe_str(item)
-        if not clean:
-            continue
-
-        key = clean.lower()
+        key = (
+            str(item.get("type", "")).lower().strip(),
+            str(item.get("name", "")).lower().strip(),
+            str(item.get("text", "")).lower().strip(),
+            str(item.get("path", "")).lower().strip(),
+        )
         if key not in seen:
             seen.add(key)
-            result.append(clean)
+            result.append(item)
 
-    return result
+    return result[:max_items]
