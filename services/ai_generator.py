@@ -301,7 +301,8 @@ def merge_batch_results_locally(
         for screen in analysis.get("screens", []):
             screen_key = normalize_text_key(screen.get("name", ""))
             if not screen_key:
-                screen_key = normalize_text_key(json.dumps(screen, ensure_ascii=False))
+                screen_key = normalize_text_key(
+                    json.dumps(screen, ensure_ascii=False))
 
             if screen_key not in screens_seen:
                 screens_seen.add(screen_key)
@@ -311,7 +312,8 @@ def merge_batch_results_locally(
             new_req = dict(req)
             new_req["id"] = f"FR-{fr_counter:03d}"
             fr_counter += 1
-            combined["analysis_document"]["functional_requirements"].append(new_req)
+            combined["analysis_document"]["functional_requirements"].append(
+                new_req)
 
         for rule in analysis.get("business_rules", []):
             new_rule = dict(rule)
@@ -331,7 +333,8 @@ def merge_batch_results_locally(
             key = normalize_text_key(question)
             if key and key not in questions_seen:
                 questions_seen.add(key)
-                combined["analysis_document"]["open_questions"].append(question)
+                combined["analysis_document"]["open_questions"].append(
+                    question)
 
         for note in analysis.get("qa_notes", []):
             key = normalize_text_key(note)
@@ -408,8 +411,10 @@ def prepare_context_for_prompt(context: Dict[str, Any]) -> Dict[str, Any]:
         }
 
         prepared["jira_context"] = shrink_jira_context(jira_context)
-        prepared["figma_contexts"] = [shrink_figma_context(x) for x in figma_contexts[:5]]
-        prepared["confluence_contexts"] = [shrink_confluence_context(x) for x in confluence_contexts[:5]]
+        prepared["figma_contexts"] = [
+            shrink_figma_context(x) for x in figma_contexts[:5]]
+        prepared["confluence_contexts"] = [
+            shrink_confluence_context(x) for x in confluence_contexts[:5]]
         prepared["analysis_document_contexts"] = [
             shrink_analysis_doc_context(x) for x in analysis_doc_contexts[:5]
         ]
@@ -568,8 +573,10 @@ def normalize_test_case_key(case: Dict[str, Any]) -> str:
     if not summary and not steps:
         return ""
 
-    action_blob = " ".join(normalize_text_key(step.get("action", "")) for step in steps[:3])
-    expected_blob = " ".join(normalize_text_key(step.get("expected_result", "")) for step in steps[:2])
+    action_blob = " ".join(normalize_text_key(
+        step.get("action", "")) for step in steps[:3])
+    expected_blob = " ".join(normalize_text_key(
+        step.get("expected_result", "")) for step in steps[:2])
 
     return f"{summary}|{action_blob}|{expected_blob}"
 

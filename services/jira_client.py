@@ -1,7 +1,7 @@
 import base64
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 import requests
 
@@ -51,7 +51,8 @@ class JiraClient:
             return
 
         if self.config.deployment_type == "cloud" and self.config.email and self.config.api_token:
-            token = f"{self.config.email}:{self.config.api_token}".encode("utf-8")
+            token = f"{self.config.email}:{self.config.api_token}".encode(
+                "utf-8")
             encoded = base64.b64encode(token).decode("utf-8")
             self.session.headers["Authorization"] = f"Basic {encoded}"
             return
@@ -95,7 +96,7 @@ class JiraClient:
         response.raise_for_status()
         return response.content
 
-    def get_issue(self, issue_key: str) -> Dict[str, Any]:
+    def get_issue(self, issue_key: str, expand: Optional[List[str]] = None) -> Dict[str, Any]:
         fields = [
             "summary",
             "description",
@@ -111,16 +112,18 @@ class JiraClient:
             "attachment",
             "issuelinks",
             "comment",
+            "created",
             "*all",
         ]
+        params: Dict[str, Any] = {"fields": ",".join(fields)}
+        if expand:
+            params["expand"] = ",".join(expand)
+
         path = f"{self._api_prefix()}/issue/{issue_key}"
-        return self._request(
-            "GET",
-            path,
-            params={
-                "fields": ",".join(fields),
-            },
-        )
+        return self._request("GET", path, params=params)
+
+    def get_issue_with_changelog(self, issue_key: str) -> Dict[str, Any]:
+        return self.get_issue(issue_key, expand=["changelog"])
 
     def get_comments(self, issue_key: str) -> List[Dict[str, Any]]:
         path = f"{self._api_prefix()}/issue/{issue_key}/comment"
@@ -134,6 +137,68 @@ class JiraClient:
             return data
         return data.get("values", [])
 
+    def search_issues(
+        self,
+        jql: str,
+        fields: Optional[List[str]] = None,
+        start_at: int = 0,
+        max_results: int = 50,
+    ) -> Dict[str, Any]:
+        path = f"{self._api_prefix()}/search"
+        params = {
+            "jql": jql,
+            "startAt": start_at,
+            "maxResults": max_results,
+        }
+        if fields:
+            params["fields"] = ",".join(fields)
+
+        return self._request("GET", path, params=params)
+
+    def search_issues_paginated(
+        self,
+        jql: str,
+        fields: Optional[List[str]] = None,
+        batch_size: int = 50,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        issues: List[Dict[str, Any]] = []
+        start_at = 0
+
+        while True:
+            data = self.search_issues(
+                jql=jql,
+                fields=fields,
+                start_at=start_at,
+                max_results=min(batch_size, max(1, limit - len(issues))),
+            )
+
+            batch = data.get("issues", []) or []
+            issues.extend(batch)
+
+            total = int(data.get("total", 0) or 0)
+            start_at += len(batch)
+
+            if not batch:
+                break
+
+            if len(issues) >= limit:
+                break
+
+            if start_at >= total:
+                break
+
+        return issues[:limit]
+
+    def list_projects(self) -> List[Dict[str, Any]]:
+        path = f"{self._api_prefix()}/project"
+        data = self._request("GET", path)
+
+        if isinstance(data, list):
+            return data
+
+        return data.get("values", [])
+
     def get_issue_bundle(
         self,
         issue_key: str,
@@ -141,11 +206,12 @@ class JiraClient:
         max_attachments: int = 5,
         max_attachment_size_bytes: int = 5 * 1024 * 1024,
         max_attachment_text_chars: int = 15000,
+        include_changelog: bool = False,
     ) -> Dict[str, Any]:
-        issue = self.get_issue(issue_key)
-
-        comments = []
-        remote_links = []
+        if include_changelog:
+            issue = self.get_issue_with_changelog(issue_key)
+        else:
+            issue = self.get_issue(issue_key)
 
         fields = issue.get("fields", {})
         if not fields.get("comment"):
@@ -222,10 +288,12 @@ class JiraClient:
 
             try:
                 content_bytes = self._request_bytes(content_url)
-                extracted_text = extract_text_from_upload(filename, content_bytes)
+                extracted_text = extract_text_from_upload(
+                    filename, content_bytes)
 
                 if len(extracted_text) > max_attachment_text_chars:
-                    extracted_text = extracted_text[:max_attachment_text_chars] + "\n...[TRUNCATED]..."
+                    extracted_text = extracted_text[:max_attachment_text_chars] + \
+                        "\\n...[TRUNCATED]..."
 
                 extracted.append(
                     {
@@ -267,10 +335,9 @@ def extract_text_from_jira_value(value: Any) -> str:
         return value
 
     if isinstance(value, list):
-        return "\n".join([extract_text_from_jira_value(item) for item in value if item is not None])
+        return "\\n".join([extract_text_from_jira_value(item) for item in value if item is not None])
 
     if isinstance(value, dict):
-        # Atlassian Document Format
         if value.get("type") == "doc":
             return _flatten_adf_node(value)
 
@@ -282,7 +349,7 @@ def extract_text_from_jira_value(value: Any) -> str:
             if item_text:
                 text_parts.append(item_text)
 
-        return "\n".join(text_parts)
+        return "\\n".join(text_parts)
 
     return str(value)
 
@@ -306,13 +373,13 @@ def _flatten_adf_node(node: Any) -> str:
 
     if node_type in {"paragraph", "heading", "blockquote", "listItem"}:
         inner = "".join(_flatten_adf_node(child) for child in content).strip()
-        return f"{inner}\n" if inner else ""
+        return f"{inner}\\n" if inner else ""
 
     if node_type in {"bulletList", "orderedList"}:
         return "".join(_flatten_adf_node(child) for child in content)
 
     if node_type == "hardBreak":
-        return "\n"
+        return "\\n"
 
     if node_type == "text":
         return text
