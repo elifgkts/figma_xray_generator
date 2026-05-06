@@ -30,7 +30,8 @@ Kaynak önceliği:
 2. Figma
 3. Analiz dokümanı
 4. Jira description
-5. Jira comments
+5. Jira attachment içerikleri
+6. Jira comments
 
 Önemli kurallar:
 - Türkçe yaz.
@@ -39,6 +40,7 @@ Kaynak önceliği:
 - Priority değerleri yalnızca Highest, High, Medium, Low olabilir.
 - Test Type her zaman Manual olmalı.
 - Jira comment içeriğini doğrudan requirement sayma.
+- Attachment içeriğini requirement gibi kullanabilirsin ama belirsizse needs_confirmation işaretle.
 - Figma veya görselde görülen bir davranış, Confluence ile çelişiyorsa Confluence önceliklidir.
 - Belirsiz noktaları açıkça belirt.
 - source_confidence alanını doğru kullan:
@@ -61,7 +63,6 @@ Test case üretim kuralları:
 - Mutlu akış, validasyon, hata ve alternatif akışlar düşünülmeli.
 - Ancak kaynaktan çıkmayan hata mesajlarını kesinmiş gibi yazma.
 - Her test case tek bir davranışı doğrulamalı.
-- Çok genel ifadelerden kaçın.
 - Gereksiz duplicate test case üretme.
 
 Çoklu ekran görüntüsü varsa:
@@ -78,11 +79,6 @@ def generate_analysis_and_tests(
     image_url: Optional[str] = None,
     image_urls: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """
-    Verilen context ve opsiyonel görsellerden
-    analiz dokümanı + Xray test case JSON çıktısı üretir.
-    """
-
     if not openai_api_key:
         raise ValueError(
             "OPENAI_API_KEY bulunamadı. "
@@ -154,33 +150,29 @@ Bağlam Özeti:
     except AuthenticationError as exc:
         raise RuntimeError(
             "OpenAI API key geçersiz görünüyor. "
-            "Lütfen OPENAI_API_KEY değerini kontrol et. "
-            "Gerekirse yeni bir API key oluşturup uygulamayı yeniden başlat."
+            "Lütfen OPENAI_API_KEY değerini kontrol et."
         ) from exc
 
     except RateLimitError as exc:
         raise RuntimeError(
             "OpenAI rate limit veya kota sınırına takıldı. "
-            "Bir süre bekleyip tekrar dene. Gerekirse billing ve usage limitlerini kontrol et."
+            "Bir süre bekleyip tekrar dene."
         ) from exc
 
     except BadRequestError as exc:
         raise RuntimeError(
             "OpenAI isteği geçersiz görünüyor. "
-            "Model adı, JSON schema veya gönderilen veri formatı ile ilgili bir sorun olabilir. "
             f"Kullanılan model: {model}"
         ) from exc
 
     except APIConnectionError as exc:
         raise RuntimeError(
-            "OpenAI API bağlantısı kurulamadı. "
-            "Bağlantı veya geçici servis erişim problemi olabilir."
+            "OpenAI API bağlantısı kurulamadı."
         ) from exc
 
     except APIError as exc:
         raise RuntimeError(
-            "OpenAI tarafında geçici bir hata oluştu. "
-            "Bir süre sonra tekrar dene."
+            "OpenAI tarafında geçici bir hata oluştu."
         ) from exc
 
     output_text = getattr(response, "output_text", None)
@@ -189,18 +181,12 @@ Bağlam Özeti:
         output_text = _extract_output_text(response)
 
     if not output_text:
-        raise RuntimeError(
-            "OpenAI cevabı boş döndü. "
-            "Model çıktısı alınamadı."
-        )
+        raise RuntimeError("OpenAI cevabı boş döndü.")
 
     try:
         parsed_result = json.loads(output_text)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(
-            "OpenAI JSON çıktısı parse edilemedi. "
-            "Model beklenen JSON formatında cevap üretmemiş olabilir."
-        ) from exc
+        raise RuntimeError("OpenAI JSON çıktısı parse edilemedi.") from exc
 
     return parsed_result
 
@@ -212,11 +198,6 @@ def generate_analysis_and_tests_for_image_batches(
     image_urls: List[str],
     batch_size: int = 6,
 ) -> Dict[str, Any]:
-    """
-    Çok sayıda görsel varsa hepsini batch batch analiz eder,
-    sonra sonuçları tek analiz çıktısında birleştirir.
-    """
-
     if not image_urls:
         return generate_analysis_and_tests(
             openai_api_key=openai_api_key,
@@ -245,8 +226,7 @@ def generate_analysis_and_tests_for_image_batches(
             "image_indexes_in_this_batch": list(range(start + 1, end + 1)),
             "instruction": (
                 "Bu batch içindeki ekranları ayrı ayrı analiz et. "
-                "Genel akışın bir parçası olarak değerlendir. "
-                "Bu batch'te görülen requirement, business rule ve test senaryolarını çıkar."
+                "Genel akışın bir parçası olarak değerlendir."
             ),
         }
 
@@ -273,11 +253,6 @@ def merge_batch_results_locally(
     total_images: int,
     total_batches: int,
 ) -> Dict[str, Any]:
-    """
-    Batch sonuçlarını lokal olarak birleştirir.
-    Ekstra model çağrısı yapmaz.
-    """
-
     combined = {
         "analysis_document": {
             "title": "Çok Kaynaklı Analiz ve Gereksinim Dokümanı",
@@ -408,9 +383,6 @@ def merge_batch_results_locally(
 
 
 def prepare_context_for_prompt(context: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Modele daha okunabilir ve kompakt context verir.
-    """
     prepared = copy.deepcopy(context)
 
     if prepared.get("source") == "merged_multi_source_context":
@@ -425,6 +397,7 @@ def prepare_context_for_prompt(context: Dict[str, Any]) -> Dict[str, Any]:
             "jira_priority": jira_context.get("priority", ""),
             "jira_status": jira_context.get("status", ""),
             "jira_comment_count": len(jira_context.get("comments", [])),
+            "jira_attachment_text_count": len(jira_context.get("attachment_texts", [])),
             "jira_url_count": len(jira_context.get("extracted_urls", [])),
             "figma_context_count": len(figma_contexts),
             "confluence_context_count": len(confluence_contexts),
@@ -461,6 +434,15 @@ def shrink_jira_context(ctx: Dict[str, Any]) -> Dict[str, Any]:
             for item in ctx.get("custom_fields", [])[:20]
         ],
         "attachments": ctx.get("attachments", [])[:20],
+        "attachment_texts": [
+            {
+                "filename": item.get("filename", ""),
+                "mime_type": item.get("mime_type", ""),
+                "text": truncate_text(item.get("text", ""), 6000),
+            }
+            for item in ctx.get("attachment_texts", [])[:10]
+        ],
+        "attachment_processing_summary": ctx.get("attachment_processing_summary", [])[:20],
         "linked_issues": ctx.get("linked_issues", [])[:20],
         "remote_links": ctx.get("remote_links", [])[:20],
         "extracted_urls": ctx.get("extracted_urls", [])[:30],
@@ -521,8 +503,7 @@ def build_merged_project_summary(
     if source == "merged_multi_source_context":
         return (
             "Bu doküman, birden fazla kaynaktan toplanan bilgiler kullanılarak üretilmiştir. "
-            "Jira task, varsa Confluence ve Figma bağlantıları ile birlikte değerlendirilmiş; "
-            "tekrarlayan bilgiler birleştirilmiş ve test tasarımı için kullanılabilir hale getirilmiştir."
+            "Jira task, varsa Confluence ve Figma bağlantıları ile attachment içerikleri birlikte değerlendirilmiştir."
         )
 
     if total_images > 0:
@@ -546,8 +527,8 @@ def build_merged_scope(
 
     if source == "merged_multi_source_context":
         return (
-            "Kapsam; issue içeriği, ilişkili bağlantılar, dokümanlar ve tasarım verilerinden "
-            "elde edilen ekranlar, iş kuralları, akışlar ve test senaryolarını içerir."
+            "Kapsam; issue içeriği, attachment metinleri, ilişkili bağlantılar, dokümanlar ve "
+            "tasarım verilerinden elde edilen ekranlar, iş kuralları, akışlar ve test senaryolarını içerir."
         )
 
     if total_images > 0:
