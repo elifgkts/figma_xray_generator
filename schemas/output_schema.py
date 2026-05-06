@@ -4,7 +4,7 @@ OUTPUT_JSON_SCHEMA = {
     "required": [
         "analysis_document",
         "test_cases",
-        "generation_notes"
+        "generation_notes",
     ],
     "properties": {
         "analysis_document": {
@@ -20,15 +20,23 @@ OUTPUT_JSON_SCHEMA = {
                 "business_rules",
                 "screen_flows",
                 "open_questions",
-                "qa_notes"
+                "qa_notes",
             ],
             "properties": {
-                "title": {"type": "string"},
-                "project_summary": {"type": "string"},
-                "scope": {"type": "string"},
+                "title": {
+                    "type": "string"
+                },
+                "project_summary": {
+                    "type": "string"
+                },
+                "scope": {
+                    "type": "string"
+                },
                 "user_roles": {
                     "type": "array",
-                    "items": {"type": "string"}
+                    "items": {
+                        "type": "string"
+                    }
                 },
                 "screens": {
                     "type": "array",
@@ -39,18 +47,26 @@ OUTPUT_JSON_SCHEMA = {
                             "name",
                             "purpose",
                             "visible_elements",
-                            "interactions"
+                            "interactions",
                         ],
                         "properties": {
-                            "name": {"type": "string"},
-                            "purpose": {"type": "string"},
+                            "name": {
+                                "type": "string"
+                            },
+                            "purpose": {
+                                "type": "string"
+                            },
                             "visible_elements": {
                                 "type": "array",
-                                "items": {"type": "string"}
+                                "items": {
+                                    "type": "string"
+                                }
                             },
                             "interactions": {
                                 "type": "array",
-                                "items": {"type": "string"}
+                                "items": {
+                                    "type": "string"
+                                }
                             }
                         }
                     }
@@ -64,18 +80,24 @@ OUTPUT_JSON_SCHEMA = {
                             "id",
                             "title",
                             "description",
-                            "source_confidence"
+                            "source_confidence",
                         ],
                         "properties": {
-                            "id": {"type": "string"},
-                            "title": {"type": "string"},
-                            "description": {"type": "string"},
+                            "id": {
+                                "type": "string"
+                            },
+                            "title": {
+                                "type": "string"
+                            },
+                            "description": {
+                                "type": "string"
+                            },
                             "source_confidence": {
                                 "type": "string",
                                 "enum": [
                                     "design_based",
                                     "assumption",
-                                    "needs_confirmation"
+                                    "needs_confirmation",
                                 ]
                             }
                         }
@@ -89,17 +111,21 @@ OUTPUT_JSON_SCHEMA = {
                         "required": [
                             "id",
                             "rule",
-                            "source_confidence"
+                            "source_confidence",
                         ],
                         "properties": {
-                            "id": {"type": "string"},
-                            "rule": {"type": "string"},
+                            "id": {
+                                "type": "string"
+                            },
+                            "rule": {
+                                "type": "string"
+                            },
                             "source_confidence": {
                                 "type": "string",
                                 "enum": [
                                     "design_based",
                                     "assumption",
-                                    "needs_confirmation"
+                                    "needs_confirmation",
                                 ]
                             }
                         }
@@ -112,24 +138,32 @@ OUTPUT_JSON_SCHEMA = {
                         "additionalProperties": False,
                         "required": [
                             "flow_name",
-                            "steps"
+                            "steps",
                         ],
                         "properties": {
-                            "flow_name": {"type": "string"},
+                            "flow_name": {
+                                "type": "string"
+                            },
                             "steps": {
                                 "type": "array",
-                                "items": {"type": "string"}
+                                "items": {
+                                    "type": "string"
+                                }
                             }
                         }
                     }
                 },
                 "open_questions": {
                     "type": "array",
-                    "items": {"type": "string"}
+                    "items": {
+                        "type": "string"
+                    }
                 },
                 "qa_notes": {
                     "type": "array",
-                    "items": {"type": "string"}
+                    "items": {
+                        "type": "string"
+                    }
                 }
             }
         },
@@ -145,13 +179,17 @@ OUTPUT_JSON_SCHEMA = {
                     "precondition",
                     "labels",
                     "source_confidence",
-                    "steps"
+                    "steps",
                 ],
                 "properties": {
-                    "summary": {"type": "string"},
+                    "summary": {
+                        "type": "string"
+                    },
                     "test_type": {
                         "type": "string",
-                        "enum": ["Manual"]
+                        "enum": [
+                            "Manual"
+                        ]
                     },
                     "priority": {
                         "type": "string",
@@ -162,33 +200,44 @@ OUTPUT_JSON_SCHEMA = {
                             "Low"
                         ]
                     },
-                    "precondition": {"type": "string"},
+                    "precondition": {
+                        "type": "string"
+                    },
                     "labels": {
                         "type": "array",
-                        "items": {"type": "string"}
+                        "items": {
+                            "type": "string"
+                        }
                     },
                     "source_confidence": {
                         "type": "string",
                         "enum": [
                             "design_based",
                             "assumption",
-                            "needs_confirmation"
+                            "needs_confirmation",
                         ]
                     },
                     "steps": {
                         "type": "array",
+                        "minItems": 1,
                         "items": {
                             "type": "object",
                             "additionalProperties": False,
                             "required": [
                                 "action",
                                 "data",
-                                "expected_result"
+                                "expected_result",
                             ],
                             "properties": {
-                                "action": {"type": "string"},
-                                "data": {"type": "string"},
-                                "expected_result": {"type": "string"}
+                                "action": {
+                                    "type": "string"
+                                },
+                                "data": {
+                                    "type": "string"
+                                },
+                                "expected_result": {
+                                    "type": "string"
+                                }
                             }
                         }
                     }
@@ -197,7 +246,9 @@ OUTPUT_JSON_SCHEMA = {
         },
         "generation_notes": {
             "type": "array",
-            "items": {"type": "string"}
+            "items": {
+                "type": "string"
+            }
         }
     }
 }
