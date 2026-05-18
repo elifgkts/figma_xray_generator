@@ -70,18 +70,11 @@ def init_state() -> None:
     st.session_state.setdefault("figma_file_key", None)
     st.session_state.setdefault("audit_df", None)
     st.session_state.setdefault("audit_csv", None)
-    st.session_state.setdefault("jira_boards", [])
-    st.session_state.setdefault("jira_sprints", [])
 
 
 def clear_audit_state() -> None:
     st.session_state.audit_df = None
     st.session_state.audit_csv = None
-
-
-def reset_board_sprint_state() -> None:
-    st.session_state.jira_boards = []
-    st.session_state.jira_sprints = []
 
 
 def show_header() -> None:
@@ -100,7 +93,8 @@ def show_sidebar() -> Dict[str, Any]:
     default_model = get_secret("OPENAI_MODEL", "gpt-4o")
 
     st.sidebar.subheader("🔐 Kullanıcı Tokenları")
-    st.sidebar.caption("Bu alana girilen tokenlar sadece mevcut oturumda kullanılır.")
+    st.sidebar.caption(
+        "Bu alana girilen tokenlar sadece mevcut oturumda kullanılır.")
 
     user_figma_token = st.sidebar.text_input(
         "Figma Personal Access Token",
@@ -209,7 +203,8 @@ def show_sidebar() -> Dict[str, Any]:
         confluence_deployment = st.sidebar.selectbox(
             "Confluence Deployment",
             options=["dc", "cloud"],
-            index=0 if get_secret("CONFLUENCE_DEPLOYMENT", jira_deployment) == "dc" else 1,
+            index=0 if get_secret("CONFLUENCE_DEPLOYMENT",
+                                  jira_deployment) == "dc" else 1,
         )
 
         confluence_email = st.sidebar.text_input(
@@ -393,7 +388,7 @@ def shrink_context_for_model(value: Any) -> Any:
         return [shrink_context_for_model(v) for v in value]
     if isinstance(value, str):
         if len(value) > MAX_CONTEXT_STR_LEN:
-            return value[:MAX_CONTEXT_STR_LEN] + "\n...[TRUNCATED]..."
+            return value[:MAX_CONTEXT_STR_LEN] + "\\n...[TRUNCATED]..."
         return value
     return value
 
@@ -410,9 +405,11 @@ def handle_figma_scan(figma_url: str, figma_token: str) -> None:
     try:
         with st.spinner("Figma dosyasındaki ekranlar taranıyor..."):
             figma_client = FigmaClient(figma_token)
-            outline_payload = figma_client.get_design_outline_payload(figma_url, depth=3)
+            outline_payload = figma_client.get_design_outline_payload(
+                figma_url, depth=3)
             candidates = extract_candidate_frames(outline_payload)
-            st.session_state["figma_file_key"] = outline_payload.get("file_key")
+            st.session_state["figma_file_key"] = outline_payload.get(
+                "file_key")
             st.session_state["figma_candidates"] = candidates
 
         if candidates:
@@ -438,7 +435,8 @@ def show_candidate_selector() -> Optional[str]:
         st.divider()
         st.subheader("Bulunan Figma Ekranları")
 
-        candidate_labels = [item["label"] for item in st.session_state["figma_candidates"]]
+        candidate_labels = [item["label"]
+                            for item in st.session_state["figma_candidates"]]
 
         selected_label = st.selectbox(
             "Analiz edilecek ekran/frame seç",
@@ -456,82 +454,6 @@ def show_candidate_selector() -> Optional[str]:
             st.json(selected_candidate)
 
     return selected_node_id
-
-
-def handle_load_jira_boards(settings: Dict[str, Any], project_keys: List[str]) -> None:
-    if not project_keys:
-        st.error("Önce en az bir proje seç.")
-        st.stop()
-
-    try:
-        jira_client = build_jira_client(settings)
-        with st.spinner("Board'lar Jira'dan çekiliyor..."):
-            boards = jira_client.list_boards(project_keys)
-
-        cleaned = []
-        seen = set()
-
-        for board in boards:
-            board_id = board.get("id")
-            board_name = board.get("name", "")
-            board_type = board.get("type", "")
-            if board_id is None:
-                continue
-
-            key = str(board_id)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            cleaned.append(
-                {
-                    "id": board_id,
-                    "name": board_name,
-                    "type": board_type,
-                    "label": f"{board_name} [{board_type}] ({board_id})",
-                }
-            )
-
-        cleaned = sorted(cleaned, key=lambda x: x["label"].lower())
-        st.session_state.jira_boards = cleaned
-        st.session_state.jira_sprints = []
-        st.success(f"{len(cleaned)} board bulundu.")
-
-    except Exception as exc:
-        st.error(f"Board'lar yüklenirken hata oluştu: {exc}")
-        st.stop()
-
-
-def handle_load_jira_sprints(settings: Dict[str, Any], board_id: int) -> None:
-    try:
-        jira_client = build_jira_client(settings)
-        with st.spinner("Sprint'ler Jira'dan çekiliyor..."):
-            sprints = jira_client.list_board_sprints(board_id)
-
-        cleaned = []
-        for sprint in sprints:
-            sprint_id = sprint.get("id")
-            name = sprint.get("name", "")
-            state = sprint.get("state", "")
-            if sprint_id is None:
-                continue
-
-            cleaned.append(
-                {
-                    "id": sprint_id,
-                    "name": name,
-                    "state": state,
-                    "label": f"{name} [{state}] ({sprint_id})",
-                }
-            )
-
-        cleaned = sorted(cleaned, key=lambda x: x["label"].lower())
-        st.session_state.jira_sprints = cleaned
-        st.success(f"{len(cleaned)} sprint bulundu.")
-
-    except Exception as exc:
-        st.error(f"Sprint'ler yüklenirken hata oluştu: {exc}")
-        st.stop()
 
 
 def handle_figma_or_screenshot_generation(
@@ -585,7 +507,8 @@ def handle_figma_or_screenshot_generation(
 
         if uses_screenshot:
             with st.spinner("Ekran görüntüleri hazırlanıyor..."):
-                image_data_urls = uploaded_images_to_data_urls(uploaded_screenshots)
+                image_data_urls = uploaded_images_to_data_urls(
+                    uploaded_screenshots)
 
             if not design_context:
                 design_context = build_screenshot_context(
@@ -632,7 +555,8 @@ def handle_figma_or_screenshot_generation(
                 )
 
         st.session_state.result_json = result
-        st.session_state.editable_json_text = json.dumps(result, ensure_ascii=False, indent=2)
+        st.session_state.editable_json_text = json.dumps(
+            result, ensure_ascii=False, indent=2)
         st.success("Analiz ve test case üretimi tamamlandı.")
 
     except FigmaRateLimitError as exc:
@@ -731,7 +655,8 @@ def handle_jira_task_generation(issue_key: str, settings: Dict[str, Any], user_n
             )
 
         st.session_state.result_json = result
-        st.session_state.editable_json_text = json.dumps(result, ensure_ascii=False, indent=2)
+        st.session_state.editable_json_text = json.dumps(
+            result, ensure_ascii=False, indent=2)
         st.success("Jira task modunda üretim tamamlandı.")
 
     except Exception as exc:
@@ -753,7 +678,8 @@ def handle_analysis_doc_generation(uploaded_docs: List[Any], pasted_text: str, s
     analysis_doc_contexts = []
 
     try:
-        limited_docs = uploaded_docs[:MAX_ANALYSIS_DOCS] if uploaded_docs else []
+        limited_docs = uploaded_docs[:MAX_ANALYSIS_DOCS] if uploaded_docs else [
+        ]
 
         for uploaded in limited_docs:
             text = extract_text_from_upload(uploaded.name, uploaded.getvalue())
@@ -761,7 +687,8 @@ def handle_analysis_doc_generation(uploaded_docs: List[Any], pasted_text: str, s
             analysis_doc_contexts.append(ctx)
 
         if pasted_text.strip():
-            ctx = build_analysis_doc_context(pasted_text, filename="Pasted Analysis Text")
+            ctx = build_analysis_doc_context(
+                pasted_text, filename="Pasted Analysis Text")
             analysis_doc_contexts.append(ctx)
 
         merged_context = merge_source_contexts(
@@ -783,7 +710,8 @@ def handle_analysis_doc_generation(uploaded_docs: List[Any], pasted_text: str, s
             )
 
         st.session_state.result_json = result
-        st.session_state.editable_json_text = json.dumps(result, ensure_ascii=False, indent=2)
+        st.session_state.editable_json_text = json.dumps(
+            result, ensure_ascii=False, indent=2)
         st.success("Analiz Dokümanı Modu tamamlandı.")
 
     except Exception as exc:
@@ -793,15 +721,12 @@ def handle_analysis_doc_generation(uploaded_docs: List[Any], pasted_text: str, s
 
 def handle_jira_audit_generation(
     project_keys: List[str],
-    filter_mode: str,
     start_date,
     end_date,
     issue_types: List[str],
-    sprint_ids: List[int],
     settings: Dict[str, Any],
     max_issues: int,
     include_attachment_contents: bool,
-    deep_link_analysis: bool,
 ) -> None:
     st.session_state.result_json = None
     st.session_state.editable_json_text = ""
@@ -811,14 +736,6 @@ def handle_jira_audit_generation(
         st.error("Lütfen en az bir proje seç.")
         st.stop()
 
-    if filter_mode in {"Tarih Aralığı", "Tarih + Sprint"} and (start_date is None or end_date is None):
-        st.error("Tarih filtreli kullanımda başlangıç ve bitiş tarihi gerekli.")
-        st.stop()
-
-    if filter_mode in {"Sprint", "Tarih + Sprint"} and not sprint_ids:
-        st.error("Sprint filtreli kullanımda en az bir sprint seç.")
-        st.stop()
-
     try:
         jira_client = build_jira_client(settings)
         all_issues = []
@@ -826,12 +743,10 @@ def handle_jira_audit_generation(
 
         for project_key in project_keys:
             jql = build_audit_jql(
-                project_keys=[project_key.strip()],
-                filter_mode=filter_mode,
-                start_date=str(start_date) if start_date else None,
-                end_date=str(end_date) if end_date else None,
+                project_key=project_key.strip(),
+                start_date=str(start_date),
+                end_date=str(end_date),
                 issue_types=issue_types,
-                sprint_ids=sprint_ids,
             )
 
             with st.spinner(f"{project_key} için issue listesi Jira'dan çekiliyor..."):
@@ -844,7 +759,6 @@ def handle_jira_audit_generation(
                         "priority",
                         "status",
                         "created",
-                        "updated",
                     ],
                     limit=per_project_limit,
                 )
@@ -864,40 +778,22 @@ def handle_jira_audit_generation(
 
         issues_to_analyze = list(unique_map.values())[:max_issues]
 
-        figma_client = None
-        if deep_link_analysis and settings.get("figma_token"):
-            try:
-                figma_client = FigmaClient(settings["figma_token"])
-            except Exception:
-                figma_client = None
-
-        confluence_client = None
-        if deep_link_analysis:
-            try:
-                confluence_client = build_confluence_client_if_possible(settings)
-            except Exception:
-                confluence_client = None
-
         with st.spinner("Issue'lar analiz ediliyor..."):
             df = audit_issues_from_search_results(
                 jira_client=jira_client,
                 issues=issues_to_analyze,
                 include_attachment_contents=include_attachment_contents,
-                filter_mode=filter_mode,
-                start_date=str(start_date) if start_date else None,
-                end_date=str(end_date) if end_date else None,
-                deep_link_analysis=deep_link_analysis,
-                figma_client=figma_client,
-                confluence_client=confluence_client,
             )
 
         st.session_state.audit_df = df
-        st.session_state.audit_csv = df.to_csv(index=False, sep=";").encode("utf-8-sig")
+        st.session_state.audit_csv = df.to_csv(
+            index=False, sep=";").encode("utf-8-sig")
         st.success(f"{len(df)} issue analiz edildi.")
 
     except Exception as exc:
         st.error(f"Jira Analysis Audit Modu sırasında hata oluştu: {exc}")
         st.stop()
+
 
 def show_analysis_context() -> None:
     if not st.session_state.design_context:
@@ -918,7 +814,8 @@ def show_analysis_context() -> None:
         metric_cols[4].metric("Link", summary.get("link_count", 0))
         metric_cols[5].metric("Component", summary.get("component_count", 0))
     else:
-        small_summary = {k: v for k, v in summary.items() if isinstance(v, (str, int, float, bool))}
+        small_summary = {k: v for k, v in summary.items(
+        ) if isinstance(v, (str, int, float, bool))}
         if small_summary:
             cols = st.columns(min(len(small_summary), 4))
             for idx, (k, v) in enumerate(list(small_summary.items())[:4]):
@@ -1036,7 +933,8 @@ def show_audit_results() -> None:
         column_config=column_config,
     )
 
-    risky_df = df[df["Analiz Açısından Riskli"] == "Evet"] if "Analiz Açısından Riskli" in df.columns else df.iloc[0:0]
+    risky_df = df[df["Analiz Açısından Riskli"] ==
+                  "Evet"] if "Analiz Açısından Riskli" in df.columns else df.iloc[0:0]
 
     col_a, col_b, col_c = st.columns(3)
     col_a.metric("Toplam Issue", len(df))
@@ -1087,15 +985,11 @@ def main() -> None:
 
     selected_group = "bip"
     selected_projects: List[str] = []
-    filter_mode = "Tarih Aralığı"
-    audit_issue_types = ["Story", "Task", "Sub-task"]
+    audit_issue_types = ["Story", "Task"]
     audit_start_date = None
     audit_end_date = None
-    selected_board_id = None
-    selected_sprint_ids: List[int] = []
     audit_max_issues = 100
     audit_include_attachment_contents = False
-    audit_deep_link_analysis = True
 
     if mode in ["Figma API Modu", "Hibrit Mod"]:
         st.subheader("Figma Linki")
@@ -1108,7 +1002,8 @@ def main() -> None:
         col_scan, col_info = st.columns([1, 4])
 
         with col_scan:
-            scan_button = st.button("Figma ekranlarını tara", use_container_width=True)
+            scan_button = st.button(
+                "Figma ekranlarını tara", use_container_width=True)
 
         with col_info:
             st.caption(
@@ -1188,63 +1083,19 @@ def main() -> None:
             "Projeler",
             options=PROJECT_GROUPS[selected_group],
             default=PROJECT_GROUPS[selected_group],
-            on_change=reset_board_sprint_state,
         )
 
-        filter_mode = st.radio(
-            "Filtre Tipi",
-            options=["Tarih Aralığı", "Sprint", "Tarih + Sprint"],
-            horizontal=True,
-        )
-
-        if filter_mode in {"Tarih Aralığı", "Tarih + Sprint"}:
-            col1, col2 = st.columns(2)
-            with col1:
-                audit_start_date = st.date_input("Başlangıç Tarihi")
-            with col2:
-                audit_end_date = st.date_input("Bitiş Tarihi")
+        col1, col2 = st.columns(2)
+        with col1:
+            audit_start_date = st.date_input("Başlangıç Tarihi")
+        with col2:
+            audit_end_date = st.date_input("Bitiş Tarihi")
 
         audit_issue_types = st.multiselect(
             "Issue Types",
-            options=["Story", "Task", "Sub-task", "Bug", "Epic"],
-            default=["Story", "Task", "Sub-task"],
+            options=["Story", "Task", "Bug", "Epic"],
+            default=["Story", "Task"],
         )
-
-        if filter_mode in {"Sprint", "Tarih + Sprint"}:
-            st.markdown("**Sprint Filtresi**")
-
-            col_b1, col_b2 = st.columns([1, 2])
-            with col_b1:
-                if st.button("Board'ları Yükle", use_container_width=True):
-                    handle_load_jira_boards(settings, selected_projects)
-
-            with col_b2:
-                if st.session_state.get("jira_boards"):
-                    selected_board_label = st.selectbox(
-                        "Board Seç",
-                        options=[b["label"] for b in st.session_state.jira_boards],
-                    )
-                    selected_board = next(
-                        b for b in st.session_state.jira_boards if b["label"] == selected_board_label
-                    )
-                    selected_board_id = int(selected_board["id"])
-
-            if selected_board_id is not None:
-                col_s1, col_s2 = st.columns([1, 2])
-                with col_s1:
-                    if st.button("Sprint'leri Yükle", use_container_width=True):
-                        handle_load_jira_sprints(settings, selected_board_id)
-
-                with col_s2:
-                    if st.session_state.get("jira_sprints"):
-                        selected_sprint_labels = st.multiselect(
-                            "Sprint Seç",
-                            options=[s["label"] for s in st.session_state.jira_sprints],
-                        )
-                        selected_sprints = [
-                            s for s in st.session_state.jira_sprints if s["label"] in selected_sprint_labels
-                        ]
-                        selected_sprint_ids = [int(s["id"]) for s in selected_sprints]
 
         col3, col4 = st.columns(2)
         with col3:
@@ -1262,16 +1113,9 @@ def main() -> None:
                 help="Daha yavaş olabilir ama attachment içindeki bağlamı da kalite değerlendirmesine katabilir.",
             )
 
-        audit_deep_link_analysis = st.checkbox(
-            "Task içindeki Confluence / Figma linklerini derin analiz et",
-            value=True,
-            help="Açıksa issue içindeki linklerin içeriğine de erişmeye çalışır. Erişim yoksa veya yetki yetersizse bunu sonuç tablosunda belirtir.",
-        )
-
         st.caption(
-            "Bu mod, seçilen projelerde Story/Task/Sub-task issue'larını tarar. "
-            "Tarih filtresinde issue'nun create tarihi değil, Ready To Test/Test'e geçiş tarihi esas alınır. "
-            "Sprint filtresi de opsiyonel olarak kullanılabilir. Link derin analizi açıksa Confluence/Figma içeriklerine de erişmeyi dener."
+            "Bu mod, seçilen projelerde belirtilen tarih aralığındaki Story/Task issue'larını tarar ve "
+            "analiz dokümanı linki, Figma linki, açıklama kalitesi ve QA readiness durumunu tablo halinde gösterir."
         )
 
     user_notes = st.text_area(
@@ -1323,15 +1167,12 @@ def main() -> None:
         elif mode == "Jira Analysis Audit Modu":
             handle_jira_audit_generation(
                 project_keys=selected_projects,
-                filter_mode=filter_mode,
                 start_date=audit_start_date,
                 end_date=audit_end_date,
                 issue_types=audit_issue_types,
-                sprint_ids=selected_sprint_ids,
                 settings=settings,
                 max_issues=int(audit_max_issues),
                 include_attachment_contents=audit_include_attachment_contents,
-                deep_link_analysis=audit_deep_link_analysis,
             )
 
     show_analysis_context()
