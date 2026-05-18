@@ -51,7 +51,8 @@ class JiraClient:
             return
 
         if self.config.deployment_type == "cloud" and self.config.email and self.config.api_token:
-            token = f"{self.config.email}:{self.config.api_token}".encode("utf-8")
+            token = f"{self.config.email}:{self.config.api_token}".encode(
+                "utf-8")
             encoded = base64.b64encode(token).decode("utf-8")
             self.session.headers["Authorization"] = f"Basic {encoded}"
             return
@@ -66,9 +67,6 @@ class JiraClient:
         if self.config.deployment_type == "cloud":
             return "/rest/api/3"
         return "/rest/api/2"
-
-    def _agile_prefix(self) -> str:
-        return "/rest/agile/1.0"
 
     def _request(self, method: str, path: str, **kwargs) -> Dict[str, Any]:
         url = urljoin(self.base_url + "/", path.lstrip("/"))
@@ -115,8 +113,6 @@ class JiraClient:
             "issuelinks",
             "comment",
             "created",
-            "updated",
-            "sprint",
             "*all",
         ]
         params: Dict[str, Any] = {"fields": ",".join(fields)}
@@ -202,55 +198,6 @@ class JiraClient:
             return data
 
         return data.get("values", [])
-
-    def list_boards(self, project_keys: List[str], board_type: Optional[str] = None) -> List[Dict[str, Any]]:
-        values: List[Dict[str, Any]] = []
-
-        for project_key in project_keys:
-            start_at = 0
-            while True:
-                params: Dict[str, Any] = {
-                    "projectKeyOrId": project_key,
-                    "startAt": start_at,
-                    "maxResults": 50,
-                }
-                if board_type:
-                    params["type"] = board_type
-
-                data = self._request("GET", f"{self._agile_prefix()}/board", params=params)
-                batch = data.get("values", []) or []
-                values.extend(batch)
-
-                if data.get("isLast", True):
-                    break
-
-                start_at += len(batch)
-
-        return values
-
-    def list_board_sprints(self, board_id: int, state: str = "active,closed,future") -> List[Dict[str, Any]]:
-        values: List[Dict[str, Any]] = []
-        start_at = 0
-
-        while True:
-            data = self._request(
-                "GET",
-                f"{self._agile_prefix()}/board/{board_id}/sprint",
-                params={
-                    "state": state,
-                    "startAt": start_at,
-                    "maxResults": 50,
-                },
-            )
-            batch = data.get("values", []) or []
-            values.extend(batch)
-
-            if data.get("isLast", True):
-                break
-
-            start_at += len(batch)
-
-        return values
 
     def get_issue_bundle(
         self,
@@ -341,10 +288,12 @@ class JiraClient:
 
             try:
                 content_bytes = self._request_bytes(content_url)
-                extracted_text = extract_text_from_upload(filename, content_bytes)
+                extracted_text = extract_text_from_upload(
+                    filename, content_bytes)
 
                 if len(extracted_text) > max_attachment_text_chars:
-                    extracted_text = extracted_text[:max_attachment_text_chars] + "\n...[TRUNCATED]..."
+                    extracted_text = extracted_text[:max_attachment_text_chars] + \
+                        "\\n...[TRUNCATED]..."
 
                 extracted.append(
                     {
@@ -386,7 +335,7 @@ def extract_text_from_jira_value(value: Any) -> str:
         return value
 
     if isinstance(value, list):
-        return "\n".join([extract_text_from_jira_value(item) for item in value if item is not None])
+        return "\\n".join([extract_text_from_jira_value(item) for item in value if item is not None])
 
     if isinstance(value, dict):
         if value.get("type") == "doc":
@@ -400,7 +349,7 @@ def extract_text_from_jira_value(value: Any) -> str:
             if item_text:
                 text_parts.append(item_text)
 
-        return "\n".join(text_parts)
+        return "\\n".join(text_parts)
 
     return str(value)
 
@@ -424,13 +373,13 @@ def _flatten_adf_node(node: Any) -> str:
 
     if node_type in {"paragraph", "heading", "blockquote", "listItem"}:
         inner = "".join(_flatten_adf_node(child) for child in content).strip()
-        return f"{inner}\n" if inner else ""
+        return f"{inner}\\n" if inner else ""
 
     if node_type in {"bulletList", "orderedList"}:
         return "".join(_flatten_adf_node(child) for child in content)
 
     if node_type == "hardBreak":
-        return "\n"
+        return "\\n"
 
     if node_type == "text":
         return text
