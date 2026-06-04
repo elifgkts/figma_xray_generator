@@ -3,11 +3,14 @@ import io
 import json
 import os
 from typing import Any, Optional, List, Dict
+import datetime
 
 import streamlit as st
 from dotenv import load_dotenv
 from PIL import Image
+import pandas as pd
 
+# Mevcut servis bağımlılıkların
 from services.figma_client import FigmaClient, FigmaRateLimitError
 from services.figma_parser import build_design_context, extract_candidate_frames
 from services.ai_generator import (
@@ -70,11 +73,13 @@ def init_state() -> None:
     st.session_state.setdefault("figma_file_key", None)
     st.session_state.setdefault("audit_df", None)
     st.session_state.setdefault("audit_csv", None)
+    st.session_state.setdefault("weekly_df", None)  # Haftalık analiz state'i
 
 
 def clear_audit_state() -> None:
     st.session_state.audit_df = None
     st.session_state.audit_csv = None
+    st.session_state.weekly_df = None
 
 
 def show_header() -> None:
@@ -93,8 +98,7 @@ def show_sidebar() -> Dict[str, Any]:
     default_model = get_secret("OPENAI_MODEL", "gpt-4o")
 
     st.sidebar.subheader("🔐 Kullanıcı Tokenları")
-    st.sidebar.caption(
-        "Bu alana girilen tokenlar sadece mevcut oturumda kullanılır.")
+    st.sidebar.caption("Bu alana girilen tokenlar sadece mevcut oturumda kullanılır.")
 
     user_figma_token = st.sidebar.text_input(
         "Figma Personal Access Token",
@@ -203,8 +207,7 @@ def show_sidebar() -> Dict[str, Any]:
         confluence_deployment = st.sidebar.selectbox(
             "Confluence Deployment",
             options=["dc", "cloud"],
-            index=0 if get_secret("CONFLUENCE_DEPLOYMENT",
-                                  jira_deployment) == "dc" else 1,
+            index=0 if get_secret("CONFLUENCE_DEPLOYMENT", jira_deployment) == "dc" else 1,
         )
 
         confluence_email = st.sidebar.text_input(
@@ -405,11 +408,9 @@ def handle_figma_scan(figma_url: str, figma_token: str) -> None:
     try:
         with st.spinner("Figma dosyasındaki ekranlar taranıyor..."):
             figma_client = FigmaClient(figma_token)
-            outline_payload = figma_client.get_design_outline_payload(
-                figma_url, depth=3)
+            outline_payload = figma_client.get_design_outline_payload(figma_url, depth=3)
             candidates = extract_candidate_frames(outline_payload)
-            st.session_state["figma_file_key"] = outline_payload.get(
-                "file_key")
+            st.session_state["figma_file_key"] = outline_payload.get("file_key")
             st.session_state["figma_candidates"] = candidates
 
         if candidates:
@@ -435,8 +436,7 @@ def show_candidate_selector() -> Optional[str]:
         st.divider()
         st.subheader("Bulunan Figma Ekranları")
 
-        candidate_labels = [item["label"]
-                            for item in st.session_state["figma_candidates"]]
+        candidate_labels = [item["label"] for item in st.session_state["figma_candidates"]]
 
         selected_label = st.selectbox(
             "Analiz edilecek ekran/frame seç",
@@ -444,8 +444,7 @@ def show_candidate_selector() -> Optional[str]:
         )
 
         selected_candidate = next(
-            item for item in st.session_state["figma_candidates"]
-            if item["label"] == selected_label
+            item for item in st.session_state["figma_candidates"] if item["label"] == selected_label
         )
 
         selected_node_id = selected_candidate["id"]
@@ -507,8 +506,7 @@ def handle_figma_or_screenshot_generation(
 
         if uses_screenshot:
             with st.spinner("Ekran görüntüleri hazırlanıyor..."):
-                image_data_urls = uploaded_images_to_data_urls(
-                    uploaded_screenshots)
+                image_data_urls = uploaded_images_to_data_urls(uploaded_screenshots)
 
             if not design_context:
                 design_context = build_screenshot_context(
@@ -534,7 +532,7 @@ def handle_figma_or_screenshot_generation(
         if image_data_urls:
             st.info(
                 f"{len(image_data_urls)} görselin tamamı analiz edilecek. "
-                f"Görseller {IMAGE_BATCH_SIZE}'şarlı batch'ler halinde işlenecek."
+                f"Görseller {IMAGE_BATCH_SIZE}'şarli batch'ler halinde işlenecek."
             )
 
             with st.spinner("AI tüm ekran görüntülerini batch halinde analiz ediyor..."):
@@ -555,8 +553,7 @@ def handle_figma_or_screenshot_generation(
                 )
 
         st.session_state.result_json = result
-        st.session_state.editable_json_text = json.dumps(
-            result, ensure_ascii=False, indent=2)
+        st.session_state.editable_json_text = json.dumps(result, ensure_ascii=False, indent=2)
         st.success("Analiz ve test case üretimi tamamlandı.")
 
     except FigmaRateLimitError as exc:
@@ -655,8 +652,7 @@ def handle_jira_task_generation(issue_key: str, settings: Dict[str, Any], user_n
             )
 
         st.session_state.result_json = result
-        st.session_state.editable_json_text = json.dumps(
-            result, ensure_ascii=False, indent=2)
+        st.session_state.editable_json_text = json.dumps(result, ensure_ascii=False, indent=2)
         st.success("Jira task modunda üretim tamamlandı.")
 
     except Exception as exc:
@@ -678,8 +674,7 @@ def handle_analysis_doc_generation(uploaded_docs: List[Any], pasted_text: str, s
     analysis_doc_contexts = []
 
     try:
-        limited_docs = uploaded_docs[:MAX_ANALYSIS_DOCS] if uploaded_docs else [
-        ]
+        limited_docs = uploaded_docs[:MAX_ANALYSIS_DOCS] if uploaded_docs else []
 
         for uploaded in limited_docs:
             text = extract_text_from_upload(uploaded.name, uploaded.getvalue())
@@ -687,8 +682,7 @@ def handle_analysis_doc_generation(uploaded_docs: List[Any], pasted_text: str, s
             analysis_doc_contexts.append(ctx)
 
         if pasted_text.strip():
-            ctx = build_analysis_doc_context(
-                pasted_text, filename="Pasted Analysis Text")
+            ctx = build_analysis_doc_context(pasted_text, filename="Pasted Analysis Text")
             analysis_doc_contexts.append(ctx)
 
         merged_context = merge_source_contexts(
@@ -710,8 +704,7 @@ def handle_analysis_doc_generation(uploaded_docs: List[Any], pasted_text: str, s
             )
 
         st.session_state.result_json = result
-        st.session_state.editable_json_text = json.dumps(
-            result, ensure_ascii=False, indent=2)
+        st.session_state.editable_json_text = json.dumps(result, ensure_ascii=False, indent=2)
         st.success("Analiz Dokümanı Modu tamamlandı.")
 
     except Exception as exc:
@@ -727,10 +720,12 @@ def handle_jira_audit_generation(
     settings: Dict[str, Any],
     max_issues: int,
     include_attachment_contents: bool,
+    weekly_trend: bool = False, # 🆕 Eklenen Parametre
 ) -> None:
     st.session_state.result_json = None
     st.session_state.editable_json_text = ""
     st.session_state.design_context = None
+    st.session_state.weekly_df = None # Sıfırla
 
     if not project_keys:
         st.error("Lütfen en az bir proje seç.")
@@ -758,7 +753,7 @@ def handle_jira_audit_generation(
                         "issuetype",
                         "priority",
                         "status",
-                        "created",
+                        "created", # ⚠️ Haftalık zaman analizi için kritik alan
                     ],
                     limit=per_project_limit,
                 )
@@ -786,8 +781,39 @@ def handle_jira_audit_generation(
             )
 
         st.session_state.audit_df = df
-        st.session_state.audit_csv = df.to_csv(
-            index=False, sep=";").encode("utf-8-sig")
+        st.session_state.audit_csv = df.to_csv(index=False, sep=";").encode("utf-8-sig")
+
+        # 🆕 HAFTALIK PUAN HESAPLAMA VE GRUPLAMA ALANI
+        if weekly_trend and not df.empty:
+            # Sütun adları büyük/küçük harf duyarlılığı kontrolü
+            created_col = "Created" if "Created" in df.columns else "created"
+            score_col = "Readiness Score" if "Readiness Score" in df.columns else "readiness_score"
+            
+            if created_col in df.columns and score_col in df.columns:
+                df_weekly = df.copy()
+                df_weekly[created_col] = pd.to_datetime(df_weekly[created_col], errors='coerce')
+                df_weekly = df_weekly.dropna(subset=[created_col])
+                
+                df_weekly[score_col] = pd.to_numeric(df_weekly[score_col], errors='coerce').fillna(0)
+                
+                # Haftaları Pazartesi başlangıçlı string formata getir (%Y-%m-%d)
+                df_weekly["Hafta_Grup"] = df_weekly[created_col].dt.to_period('W').apply(lambda r: r.start_time.strftime('%Y-%m-%d'))
+                
+                weekly_summary = df_weekly.groupby("Hafta_Grup").agg(
+                    Ortalama_Analiz_Puani=(score_col, "mean"),
+                    Issue_Sayisi=(score_col, "count")
+                ).reset_index()
+                
+                weekly_summary["Ortalama_Analiz_Puani"] = weekly_summary["Ortalama_Analiz_Puani"].round(1)
+                weekly_summary.rename(columns={"Hafta_Grup": "Hafta Başlangıcı"}, inplace=True)
+                
+                # W1, W2, W3... Etiketlerini ekleme
+                weekly_summary.insert(0, "Hafta", [f"W{i+1}" for i in range(len(weekly_summary))])
+                
+                st.session_state.weekly_df = weekly_summary
+            else:
+                st.warning("Haftalık trend hesaplanamadı: DataFrame içinde 'Created' veya 'Readiness Score' sütunu eksik.")
+
         st.success(f"{len(df)} issue analiz edildi.")
 
     except Exception as exc:
@@ -814,8 +840,7 @@ def show_analysis_context() -> None:
         metric_cols[4].metric("Link", summary.get("link_count", 0))
         metric_cols[5].metric("Component", summary.get("component_count", 0))
     else:
-        small_summary = {k: v for k, v in summary.items(
-        ) if isinstance(v, (str, int, float, bool))}
+        small_summary = {k: v for k, v in summary.items() if isinstance(v, (str, int, float, bool))}
         if small_summary:
             cols = st.columns(min(len(small_summary), 4))
             for idx, (k, v) in enumerate(list(small_summary.items())[:4]):
@@ -914,6 +939,23 @@ def show_audit_results() -> None:
 
     df = st.session_state.audit_df
 
+    # 🆕 HAFTALIK ANALİZ TREND GRAFİĞİ VE TABLOSUNUN GÖSTERİLMESİ
+    if st.session_state.get("weekly_df") is not None:
+        st.divider()
+        st.subheader("📈 Haftalık Analiz Puan Gelişimi (Readiness Trend)")
+        w_df = st.session_state.weekly_df
+        
+        # Streamlit Çizgi Grafiği
+        st.line_chart(
+            data=w_df,
+            x="Hafta Başlangıcı",
+            y="Ortalama_Analiz_Puani",
+            use_container_width=True
+        )
+        
+        with st.expander("📊 Hafta Bazlı Puan Kırılım Rapor Tablosu (W1, W2...)"):
+            st.dataframe(w_df, use_container_width=True, hide_index=True)
+
     st.divider()
     st.subheader("Jira Audit Sonuçları")
 
@@ -933,8 +975,7 @@ def show_audit_results() -> None:
         column_config=column_config,
     )
 
-    risky_df = df[df["Analiz Açısından Riskli"] ==
-                  "Evet"] if "Analiz Açısından Riskli" in df.columns else df.iloc[0:0]
+    risky_df = df[df["Analiz Açısından Riskli"] == "Evet"] if "Analiz Açısından Riskli" in df.columns else df.iloc[0:0]
 
     col_a, col_b, col_c = st.columns(3)
     col_a.metric("Toplam Issue", len(df))
@@ -990,8 +1031,9 @@ def main() -> None:
     audit_end_date = None
     audit_max_issues = 100
     audit_include_attachment_contents = False
+    audit_weekly_trend = False # Tanım alanı
 
-    if mode in ["Figma API Modu", "Hibrit Mod"]:
+    if mode in ["Figma API Modu", "Screenshot Modu", "Hibrit Mod"]:
         st.subheader("Figma Linki")
 
         figma_url = st.text_input(
@@ -1002,8 +1044,7 @@ def main() -> None:
         col_scan, col_info = st.columns([1, 4])
 
         with col_scan:
-            scan_button = st.button(
-                "Figma ekranlarını tara", use_container_width=True)
+            scan_button = st.button("Figma ekranlarını tara", use_container_width=True)
 
         with col_info:
             st.caption(
@@ -1025,7 +1066,7 @@ def main() -> None:
             accept_multiple_files=True,
             help=(
                 f"En fazla {MAX_SCREENSHOTS} görsel analiz edilecek. "
-                f"Görseller {IMAGE_BATCH_SIZE}'şarlı batch'lerle işlenecek."
+                f"Görseller {IMAGE_BATCH_SIZE}'şarli batch'lerle işlenecek."
             ),
         )
 
@@ -1112,6 +1153,13 @@ def main() -> None:
                 value=False,
                 help="Daha yavaş olabilir ama attachment içindeki bağlamı da kalite değerlendirmesine katabilir.",
             )
+            
+        # 🆕 Arayüze Eklenen Trend Checkbox Alanı
+        audit_weekly_trend = st.checkbox(
+            "📈 Haftalık Trend Analizi Yap",
+            value=False,
+            help="Seçilen tarih aralığını hafta hafta kırarak kalite gelişimini (W1, W2...) görselleştirir."
+        )
 
         st.caption(
             "Bu mod, seçilen projelerde belirtilen tarih aralığındaki Story/Task issue'larını tarar ve "
@@ -1173,6 +1221,7 @@ def main() -> None:
                 settings=settings,
                 max_issues=int(audit_max_issues),
                 include_attachment_contents=audit_include_attachment_contents,
+                weekly_trend=audit_weekly_trend, # 🆕 Parametre geçişi
             )
 
     show_analysis_context()
